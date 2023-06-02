@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -216,25 +217,31 @@ func (_ containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	// NO (happens in the BlobReader): defer client.Close()
 
 	// we can technically just return the manifest directly from the content store, but we need the "right" MediaType value for the Content-Type header (and thanks to https://github.com/opencontainers/image-spec/security/advisories/GHSA-77vh-xpmg-72qh we can safely assume manifests have "mediaType" set for us to parse this value out of or else they're manifests we don't care to support!)
-	// TODO actually implement the above
+	desc := ociregistry.Descriptor{Digest: digest}
 
-	is := client.ImageService()
-
-	imgs, err := is.List(ctx, "target.digest=="+strconv.Quote(string(digest)))
+	ra, err := client.ContentStore().ReaderAt(ctx, desc)
 	if err != nil {
 		client.Close()
 		return nil, err
 	}
-
-	if len(imgs) < 1 {
-		// hmm, no image found, I guess just let the content store handle it
-		// TODO convert not found into proper 404 errors
-		return newContainerdBlobReaderFromDigest(ctx, client, digest)
+	defer ra.Close()
+	var mediaTypeWrapper = struct {
+		MediaType string `json:"mediaType"`
+	}{}
+	err = json.NewDecoder(content.NewReader(ra)).Decode(&mediaTypeWrapper)
+	if err != nil {
+		client.Close()
+		return nil, err
 	}
+	if mediaTypeWrapper.MediaType == "" {
+		client.Close()
+		return nil, errors.New("failed to parse mediaType") // TODO better error
+	}
+	desc.Size = ra.Size()
+	desc.MediaType = mediaTypeWrapper.MediaType
 
+	return newContainerdBlobReaderFromDescriptor(ctx, client, desc)
 	// TODO convert not found into proper 404 errors
-	return newContainerdBlobReaderFromDescriptor(ctx, client, imgs[0].Target)
-	// TODO figure out if there's something more intelligent we should do here with our list of images if there's more than one result
 }
 
 func (_ containerdRegistry) GetTag(ctx context.Context, repo string, tagName string) (ociregistry.BlobReader, error) {
