@@ -225,7 +225,7 @@ func (_ containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 		return nil, err
 	}
 	defer ra.Close()
-	var mediaTypeWrapper = struct {
+	mediaTypeWrapper := struct {
 		MediaType string `json:"mediaType"`
 	}{}
 	err = json.NewDecoder(content.NewReader(ra)).Decode(&mediaTypeWrapper)
