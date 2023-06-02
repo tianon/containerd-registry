@@ -300,5 +300,6 @@ func main() {
 	registry := containerdRegistry{}
 	server := ociserver.New(&registry, &ociserver.Options{})
 	println("listening on http://*:5000")
+	// TODO listen address/port should be configurable somehow
 	panic(http.ListenAndServe(":5000", server))
 }
