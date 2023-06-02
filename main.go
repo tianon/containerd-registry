@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 
 	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/reference/docker"
 
 	"github.com/rogpeppe/ociregistry"
@@ -92,6 +95,91 @@ func (_ containerdRegistry) Tags(ctx context.Context, repo string) ociregistry.I
 	}
 
 	return ociregistry.SliceIter[string](tags)
+}
+
+// hack hack hack (ociregistry.Inteface expects Descriptor, not *Descriptor)
+var nilDesc = ociregistry.Descriptor{}
+
+func (_ containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName string) (ociregistry.Descriptor, error) {
+	client, err := newContainerdClient()
+	if err != nil {
+		return nilDesc, err
+	}
+	defer client.Close()
+
+	is := client.ImageService()
+
+	img, err := is.Get(ctx, repo+":"+tagName)
+	if err != nil {
+		return nilDesc, err
+	}
+
+	return img.Target, nil
+}
+
+type containerdBlobReader struct {
+	client *containerd.Client
+	ctx    context.Context
+	desc   ociregistry.Descriptor
+
+	readerAt content.ReaderAt
+	reader   io.Reader
+}
+
+func (br *containerdBlobReader) Read(p []byte) (int, error) {
+	if br.reader == nil {
+		if br.readerAt == nil {
+			var err error
+			br.readerAt, err = br.client.ContentStore().ReaderAt(br.ctx, br.desc)
+			if err != nil {
+				return 0, err
+			}
+		}
+		br.reader = content.NewReader(br.readerAt)
+	}
+	return br.reader.Read(p)
+}
+
+func (br containerdBlobReader) Descriptor() ociregistry.Descriptor {
+	return br.desc
+}
+
+func (br *containerdBlobReader) Close() error {
+	errs := []error{}
+	for _, obj := range []io.Closer{
+		br.readerAt,
+		br.client,
+	} {
+		if obj != nil {
+			err := obj.Close()
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (_ containerdRegistry) GetTag(ctx context.Context, repo string, tagName string) (ociregistry.BlobReader, error) {
+	client, err := newContainerdClient()
+	if err != nil {
+		return nil, err
+	}
+	// NO (happens in the BlobReader): defer client.Close()
+
+	is := client.ImageService()
+
+	img, err := is.Get(ctx, repo+":"+tagName)
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+
+	return &containerdBlobReader{
+		client: client,
+		ctx:    ctx,
+		desc:   img.Target,
+	}, nil
 }
 
 func main() {
