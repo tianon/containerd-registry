@@ -7,7 +7,6 @@ import (
 	"strconv"
 
 	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/reference/docker"
 
 	"github.com/rogpeppe/ociregistry"
@@ -15,17 +14,12 @@ import (
 )
 
 // caller responsible for client.Close!
-func newContainerdClient(ctx context.Context) (*containerd.Client, context.Context, error) {
-	// TODO environment variable
-	client, err := containerd.New("/run/containerd/containerd.sock")
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// TODO environment variable? caller's responsibility?  embed in API?  (registry:port/c8d-ns/image/repo:tag ?)
-	ctx = namespaces.WithNamespace(ctx, "default")
-
-	return client, ctx, nil
+func newContainerdClient() (*containerd.Client, error) {
+	// TODO environment variables (CONTAINERD_ADDRESS, CONTAINERD_NAMESPACE)
+	return containerd.New(
+		"/run/containerd/containerd.sock",
+		containerd.WithDefaultNamespace("default"),
+	)
 }
 
 type containerdRegistry struct {
@@ -33,7 +27,7 @@ type containerdRegistry struct {
 }
 
 func (_ containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[string] {
-	client, ctx, err := newContainerdClient(ctx)
+	client, err := newContainerdClient()
 	if err != nil {
 		return ociregistry.ErrorIter[string](err)
 	}
@@ -66,7 +60,7 @@ func (_ containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[s
 }
 
 func (_ containerdRegistry) Tags(ctx context.Context, repo string) ociregistry.Iter[string] {
-	client, ctx, err := newContainerdClient(ctx)
+	client, err := newContainerdClient()
 	if err != nil {
 		return ociregistry.ErrorIter[string](err)
 	}
