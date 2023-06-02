@@ -97,26 +97,6 @@ func (_ containerdRegistry) Tags(ctx context.Context, repo string) ociregistry.I
 	return ociregistry.SliceIter[string](tags)
 }
 
-// hack hack hack (ociregistry.Inteface expects Descriptor, not *Descriptor)
-var nilDesc = ociregistry.Descriptor{}
-
-func (_ containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName string) (ociregistry.Descriptor, error) {
-	client, err := newContainerdClient()
-	if err != nil {
-		return nilDesc, err
-	}
-	defer client.Close()
-
-	is := client.ImageService()
-
-	img, err := is.Get(ctx, repo+":"+tagName)
-	if err != nil {
-		return nilDesc, err
-	}
-
-	return img.Target, nil
-}
-
 type containerdBlobReader struct {
 	client *containerd.Client
 	ctx    context.Context
@@ -180,6 +160,16 @@ func (_ containerdRegistry) GetTag(ctx context.Context, repo string, tagName str
 		ctx:    ctx,
 		desc:   img.Target,
 	}, nil
+}
+
+func (r containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName string) (ociregistry.Descriptor, error) {
+	blobReader, err := r.GetTag(ctx, repo, tagName)
+	if err != nil {
+		return ociregistry.Descriptor{}, err
+	}
+	defer blobReader.Close()
+
+	return blobReader.Descriptor(), nil
 }
 
 func main() {
