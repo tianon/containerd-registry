@@ -107,21 +107,52 @@ type containerdBlobReader struct {
 	reader   io.Reader
 }
 
-func (br *containerdBlobReader) Read(p []byte) (int, error) {
-	if br.reader == nil {
-		if br.readerAt == nil {
-			var err error
-			br.readerAt, err = br.client.ContentStore().ReaderAt(br.ctx, br.desc)
-			if err != nil {
-				return 0, err
-			}
-		}
-		br.reader = content.NewReader(br.readerAt)
+func (br *containerdBlobReader) validate() error {
+	info, err := br.client.ContentStore().Info(br.ctx, br.desc.Digest)
+	if err != nil {
+		return err
 	}
-	return br.reader.Read(p)
+	// add Size/MediaType to our descriptor for poor ociregistry's sake (Content-Length/Content-Type headers)
+	if br.desc.Size == 0 && info.Size != 0 {
+		br.desc.Size = info.Size
+	}
+	if br.desc.MediaType == "" {
+		br.desc.MediaType = "application/octet-stream"
+	}
+	return nil
 }
 
-func (br containerdBlobReader) Descriptor() ociregistry.Descriptor {
+func (br *containerdBlobReader) ensureReaderAt() (content.ReaderAt, error) {
+	if br.readerAt == nil {
+		var err error
+		br.readerAt, err = br.client.ContentStore().ReaderAt(br.ctx, br.desc)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return br.readerAt, nil
+}
+
+func (br *containerdBlobReader) ensureReader() (io.Reader, error) {
+	if br.reader == nil {
+		ra, err := br.ensureReaderAt()
+		if err != nil {
+			return nil, err
+		}
+		br.reader = content.NewReader(ra)
+	}
+	return br.reader, nil
+}
+
+func (br *containerdBlobReader) Read(p []byte) (int, error) {
+	r, err := br.ensureReader()
+	if err != nil {
+		return 0, err
+	}
+	return r.Read(p)
+}
+
+func (br *containerdBlobReader) Descriptor() ociregistry.Descriptor {
 	return br.desc
 }
 
@@ -139,6 +170,71 @@ func (br *containerdBlobReader) Close() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// containerd.Client becomes owned by the returned containerdBlobReader (or Close'd by this method on error)
+func newContainerdBlobReaderFromDescriptor(ctx context.Context, client *containerd.Client, desc ociregistry.Descriptor) (*containerdBlobReader, error) {
+	br := &containerdBlobReader{
+		client: client,
+		ctx:    ctx,
+		desc:   desc,
+	}
+
+	// let's verify the blob exists (and add size to the descriptor, if it's missing)
+	if err := br.validate(); err != nil {
+		br.Close()
+		return nil, err
+	}
+
+	return br, nil
+}
+
+// containerd.Client becomes owned by the returned containerdBlobReader (or Close'd by this method on error)
+func newContainerdBlobReaderFromDigest(ctx context.Context, client *containerd.Client, digest ociregistry.Digest) (*containerdBlobReader, error) {
+	return newContainerdBlobReaderFromDescriptor(ctx, client, ociregistry.Descriptor{
+		// this is technically not a valid Descriptor, but containerd's content store is addressed by digest so it works fine ("[containerd/content.Provider.]ReaderAt only requires desc.Digest to be set.")
+		Digest: digest,
+	})
+}
+
+func (_ containerdRegistry) GetBlob(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
+	client, err := newContainerdClient()
+	if err != nil {
+		return nil, err
+	}
+	// NO (happens in the BlobReader): defer client.Close()
+
+	// TODO convert not found into proper 404 errors
+	return newContainerdBlobReaderFromDigest(ctx, client, digest)
+}
+
+func (_ containerdRegistry) GetManifest(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
+	client, err := newContainerdClient()
+	if err != nil {
+		return nil, err
+	}
+	// NO (happens in the BlobReader): defer client.Close()
+
+	// we can technically just return the manifest directly from the content store, but we need the "right" MediaType value for the Content-Type header (and thanks to https://github.com/opencontainers/image-spec/security/advisories/GHSA-77vh-xpmg-72qh we can safely assume manifests have "mediaType" set for us to parse this value out of or else they're manifests we don't care to support!)
+	// TODO actually implement the above
+
+	is := client.ImageService()
+
+	imgs, err := is.List(ctx, "target.digest=="+strconv.Quote(string(digest)))
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+
+	if len(imgs) < 1 {
+		// hmm, no image found, I guess just let the content store handle it
+		// TODO convert not found into proper 404 errors
+		return newContainerdBlobReaderFromDigest(ctx, client, digest)
+	}
+
+	// TODO convert not found into proper 404 errors
+	return newContainerdBlobReaderFromDescriptor(ctx, client, imgs[0].Target)
+	// TODO figure out if there's something more intelligent we should do here with our list of images if there's more than one result
 }
 
 func (_ containerdRegistry) GetTag(ctx context.Context, repo string, tagName string) (ociregistry.BlobReader, error) {
@@ -161,6 +257,26 @@ func (_ containerdRegistry) GetTag(ctx context.Context, repo string, tagName str
 		ctx:    ctx,
 		desc:   img.Target,
 	}, nil
+}
+
+func (r containerdRegistry) ResolveBlob(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.Descriptor, error) {
+	blobReader, err := r.GetBlob(ctx, repo, digest)
+	if err != nil {
+		return ociregistry.Descriptor{}, err
+	}
+	defer blobReader.Close()
+
+	return blobReader.Descriptor(), nil
+}
+
+func (r containerdRegistry) ResolveManifest(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.Descriptor, error) {
+	blobReader, err := r.GetManifest(ctx, repo, digest)
+	if err != nil {
+		return ociregistry.Descriptor{}, err
+	}
+	defer blobReader.Close()
+
+	return blobReader.Descriptor(), nil
 }
 
 func (r containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName string) (ociregistry.Descriptor, error) {
