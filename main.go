@@ -10,6 +10,7 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/defaults"
 	"github.com/containerd/containerd/reference/docker"
 
 	"github.com/rogpeppe/ociregistry"
@@ -20,7 +21,7 @@ import (
 func newContainerdClient() (*containerd.Client, error) {
 	// TODO environment variables (CONTAINERD_ADDRESS, CONTAINERD_NAMESPACE)
 	return containerd.New(
-		"/run/containerd/containerd.sock",
+		defaults.DefaultAddress,
 		containerd.WithDefaultNamespace("default"),
 	)
 }
