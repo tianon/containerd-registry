@@ -95,6 +95,7 @@ func (br *containerdBlobReader) validate() error {
 	info, err := br.client.ContentStore().Info(br.ctx, br.desc.Digest)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
+			// TODO return ErrManifestUnknown when this containerdBlobReader is actually supposed to be satisfying a manifest request 😅
 			return ociregistry.ErrBlobUnknown
 		}
 		return err
