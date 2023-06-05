@@ -277,6 +277,20 @@ func (r containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName
 	return blobReader.Descriptor(), nil
 }
 
+func (r containerdRegistry) DeleteBlob(ctx context.Context, repo string, digest ociregistry.Digest) error {
+	// TODO should we stop this from removing things that are still tagged or children of tagged?
+	return r.client.ContentStore().Delete(ctx, digest)
+}
+
+func (r containerdRegistry) DeleteManifest(ctx context.Context, repo string, digest ociregistry.Digest) error {
+	// TODO should we stop this from removing things that are still tagged or children of tagged?
+	return r.client.ContentStore().Delete(ctx, digest)
+}
+
+func (r containerdRegistry) DeleteTag(ctx context.Context, repo string, name string) error {
+	return r.client.ImageService().Delete(ctx, repo+":"+name)
+}
+
 func main() {
 	containerdAddr := defaults.DefaultAddress
 	if val, ok := os.LookupEnv("CONTAINERD_ADDRESS"); ok {
