@@ -291,6 +291,17 @@ func (r containerdRegistry) DeleteTag(ctx context.Context, repo string, name str
 	return r.client.ImageService().Delete(ctx, repo+":"+name)
 }
 
+// TODO func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ociregistry.Descriptor, r io.Reader) (ociregistry.Descriptor, error)
+
+// TODO func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id string, chunkSize int) (ociregistry.BlobWriter, error)
+
+func (r containerdRegistry) MountBlob(ctx context.Context, fromRepo, toRepo string, digest ociregistry.Digest) (ociregistry.Descriptor, error) {
+	// since we don't do per-repo blobs, this just succeeds
+	return r.ResolveBlob(ctx, toRepo, digest)
+}
+
+// TODO func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag string, contents []byte, mediaType string) (ociregistry.Descriptor, error)
+
 func main() {
 	containerdAddr := defaults.DefaultAddress
 	if val, ok := os.LookupEnv("CONTAINERD_ADDRESS"); ok {
