@@ -19,15 +19,6 @@ import (
 	"github.com/rogpeppe/ociregistry/ociserver"
 )
 
-// caller responsible for client.Close!
-func newContainerdClient() (*containerd.Client, error) {
-	// TODO environment variables (CONTAINERD_ADDRESS, CONTAINERD_NAMESPACE)
-	return containerd.New(
-		defaults.DefaultAddress,
-		containerd.WithDefaultNamespace("default"),
-	)
-}
-
 type containerdRegistry struct {
 	*ociregistry.Funcs
 	client *containerd.Client
@@ -255,14 +246,20 @@ func (r containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName
 }
 
 func main() {
-	client, err := newContainerdClient()
+	// TODO environment variables (CONTAINERD_ADDRESS, CONTAINERD_NAMESPACE)
+	client, err := containerd.New(
+		defaults.DefaultAddress,
+		containerd.WithDefaultNamespace("default"),
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer client.Close()
+
 	server := ociserver.New(&containerdRegistry{
 		client: client,
 	}, nil)
 	println("listening on http://*:5000")
 	// TODO listen address/port should be configurable somehow
-	panic(http.ListenAndServe(":5000", server))
+	log.Fatal(http.ListenAndServe(":5000", server))
 }
