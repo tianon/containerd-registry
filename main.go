@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -29,16 +30,11 @@ func newContainerdClient() (*containerd.Client, error) {
 
 type containerdRegistry struct {
 	*ociregistry.Funcs
+	client *containerd.Client
 }
 
-func (_ containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[string] {
-	client, err := newContainerdClient()
-	if err != nil {
-		return ociregistry.ErrorIter[string](err)
-	}
-	defer client.Close()
-
-	is := client.ImageService()
+func (r containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[string] {
+	is := r.client.ImageService()
 
 	images, err := is.List(ctx)
 	if err != nil {
@@ -64,14 +60,9 @@ func (_ containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[s
 	return ociregistry.SliceIter[string](names)
 }
 
-func (_ containerdRegistry) Tags(ctx context.Context, repo string) ociregistry.Iter[string] {
-	client, err := newContainerdClient()
-	if err != nil {
-		return ociregistry.ErrorIter[string](err)
-	}
-	defer client.Close()
+func (r containerdRegistry) Tags(ctx context.Context, repo string) ociregistry.Iter[string] {
 
-	is := client.ImageService()
+	is := r.client.ImageService()
 
 	images, err := is.List(ctx, "name~="+strconv.Quote("^"+regexp.QuoteMeta(repo)+":"))
 	if err != nil {
@@ -158,19 +149,7 @@ func (br *containerdBlobReader) Descriptor() ociregistry.Descriptor {
 }
 
 func (br *containerdBlobReader) Close() error {
-	errs := []error{}
-	for _, obj := range []io.Closer{
-		br.readerAt,
-		br.client,
-	} {
-		if obj != nil {
-			err := obj.Close()
-			if err != nil {
-				errs = append(errs, err)
-			}
-		}
-	}
-	return errors.Join(errs...)
+	return br.readerAt.Close()
 }
 
 // containerd.Client becomes owned by the returned containerdBlobReader (or Close'd by this method on error)
@@ -198,30 +177,18 @@ func newContainerdBlobReaderFromDigest(ctx context.Context, client *containerd.C
 	})
 }
 
-func (_ containerdRegistry) GetBlob(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
-	client, err := newContainerdClient()
-	if err != nil {
-		return nil, err
-	}
-	// NO (happens in the BlobReader): defer client.Close()
-
+func (r containerdRegistry) GetBlob(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
 	// TODO convert not found into proper 404 errors
-	return newContainerdBlobReaderFromDigest(ctx, client, digest)
+	return newContainerdBlobReaderFromDigest(ctx, r.client, digest)
 }
 
-func (_ containerdRegistry) GetManifest(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
-	client, err := newContainerdClient()
-	if err != nil {
-		return nil, err
-	}
-	// NO (happens in the BlobReader): defer client.Close()
+func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
 
 	// we can technically just return the manifest directly from the content store, but we need the "right" MediaType value for the Content-Type header (and thanks to https://github.com/opencontainers/image-spec/security/advisories/GHSA-77vh-xpmg-72qh we can safely assume manifests have "mediaType" set for us to parse this value out of or else they're manifests we don't care to support!)
 	desc := ociregistry.Descriptor{Digest: digest}
 
-	ra, err := client.ContentStore().ReaderAt(ctx, desc)
+	ra, err := r.client.ContentStore().ReaderAt(ctx, desc)
 	if err != nil {
-		client.Close()
 		return nil, err
 	}
 	defer ra.Close()
@@ -229,39 +196,29 @@ func (_ containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 		MediaType string `json:"mediaType"`
 	}{}
 	// TODO add a limitedreader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
-	err = json.NewDecoder(content.NewReader(ra)).Decode(&mediaTypeWrapper)
-	if err != nil {
-		client.Close()
+	if err := json.NewDecoder(content.NewReader(ra)).Decode(&mediaTypeWrapper); err != nil {
 		return nil, err
 	}
 	if mediaTypeWrapper.MediaType == "" {
-		client.Close()
 		return nil, errors.New("failed to parse mediaType") // TODO better error
 	}
 	desc.Size = ra.Size()
 	desc.MediaType = mediaTypeWrapper.MediaType
 
-	return newContainerdBlobReaderFromDescriptor(ctx, client, desc)
+	return newContainerdBlobReaderFromDescriptor(ctx, r.client, desc)
 	// TODO convert not found into proper 404 errors
 }
 
-func (_ containerdRegistry) GetTag(ctx context.Context, repo string, tagName string) (ociregistry.BlobReader, error) {
-	client, err := newContainerdClient()
-	if err != nil {
-		return nil, err
-	}
-	// NO (happens in the BlobReader): defer client.Close()
-
-	is := client.ImageService()
+func (r containerdRegistry) GetTag(ctx context.Context, repo string, tagName string) (ociregistry.BlobReader, error) {
+	is := r.client.ImageService()
 
 	img, err := is.Get(ctx, repo+":"+tagName)
 	if err != nil {
-		client.Close()
 		return nil, err
 	}
 
 	return &containerdBlobReader{
-		client: client,
+		client: r.client,
 		ctx:    ctx,
 		desc:   img.Target,
 	}, nil
@@ -298,8 +255,13 @@ func (r containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName
 }
 
 func main() {
-	registry := containerdRegistry{}
-	server := ociserver.New(&registry, &ociserver.Options{})
+	client, err := newContainerdClient()
+	if err != nil {
+		log.Fatal(err)
+	}
+	server := ociserver.New(&containerdRegistry{
+		client: client,
+	}, nil)
 	println("listening on http://*:5000")
 	// TODO listen address/port should be configurable somehow
 	panic(http.ListenAndServe(":5000", server))
