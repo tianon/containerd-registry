@@ -185,13 +185,13 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	desc.Size = ra.Size()
 
 	// wrap in a LimitedReader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
-	r := io.LimitReader(content.NewReader(ra), 4*1024*1024)
+	reader := io.LimitReader(content.NewReader(ra), 4*1024*1024)
 	// 4MiB: https://github.com/opencontainers/distribution-spec/pull/293, especially https://github.com/opencontainers/distribution-spec/pull/293#issuecomment-1452780554
 
 	mediaTypeWrapper := struct {
 		MediaType string `json:"mediaType"`
 	}{}
-	if err := json.NewDecoder(r).Decode(&mediaTypeWrapper); err != nil {
+	if err := json.NewDecoder(reader).Decode(&mediaTypeWrapper); err != nil {
 		return nil, err
 	}
 	if mediaTypeWrapper.MediaType == "" {
