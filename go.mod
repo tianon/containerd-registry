@@ -4,8 +4,11 @@ go 1.20
 
 require (
 	github.com/containerd/containerd v1.7.1
-	github.com/rogpeppe/ociregistry v0.0.0-20230528100241-a9296552221e
+	go.cuelabs.dev/ociregistry v0.0.0-00010101000000-000000000000
 )
+
+// TODO https://github.com/rogpeppe/ociregistry/commit/1a69a15c0157d4ad44031c6e5f6e35f5a9981c9d (canonical Go path is not set up yet)
+replace go.cuelabs.dev/ociregistry => github.com/rogpeppe/ociregistry v0.0.0-20230605142646-9139970993fb
 
 require (
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20230106234847-43070de90fa1 // indirect

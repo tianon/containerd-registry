@@ -16,8 +16,8 @@ import (
 	"github.com/containerd/containerd/defaults"
 	"github.com/containerd/containerd/reference/docker"
 
-	"github.com/rogpeppe/ociregistry"
-	"github.com/rogpeppe/ociregistry/ociserver"
+	"go.cuelabs.dev/ociregistry"
+	"go.cuelabs.dev/ociregistry/ociserver"
 )
 
 type containerdRegistry struct {
