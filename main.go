@@ -298,11 +298,6 @@ func (r containerdRegistry) DeleteTag(ctx context.Context, repo string, name str
 func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ociregistry.Descriptor, reader io.Reader) (ociregistry.Descriptor, error) {
 	cs := r.client.ContentStore()
 
-	ingestRef := string(desc.Digest)
-
-	// explicitly "abort" the ref we're about to use in case there's a partial or failed ingest already (which content.WriteBlob will then quietly reuse, over and over)
-	_ = cs.Abort(ctx, ingestRef)
-
 	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add a generous 15 minute lease so we have time to get to it being tagged before gc takes it
 	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(15*time.Minute)) // TODO make this period configurable?
 	if err != nil {
@@ -314,6 +309,11 @@ func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ocir
 		reader,
 		desc.Size+1, // +1 to allow WriteBlob to detect if it reads too much
 	)
+
+	ingestRef := string(desc.Digest)
+
+	// explicitly "abort" the ref we're about to use in case there's a partial or failed ingest already (which content.WriteBlob will then quietly reuse, over and over)
+	_ = cs.Abort(ctx, ingestRef)
 
 	if err := content.WriteBlob(ctx, cs, ingestRef, reader, desc); err != nil {
 		_ = cs.Abort(ctx, ingestRef)
