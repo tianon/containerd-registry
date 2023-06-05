@@ -238,14 +238,14 @@ func (r containerdRegistry) GetTag(ctx context.Context, repo string, tagName str
 
 	img, err := is.Get(ctx, repo+":"+tagName)
 	if err != nil {
+		if errdefs.IsNotFound(err) {
+			// TODO differentiate ErrNameUnknown (repo unknown) from ErrManifestUnknown ?
+			return nil, ociregistry.ErrManifestUnknown
+		}
 		return nil, err
 	}
 
-	return &containerdBlobReader{
-		client: r.client,
-		ctx:    ctx,
-		desc:   img.Target,
-	}, nil
+	return newContainerdBlobReaderFromDescriptor(ctx, r.client, img.Target)
 }
 
 func (r containerdRegistry) ResolveBlob(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.Descriptor, error) {
