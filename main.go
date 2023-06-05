@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/defaults"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/reference/docker"
 
 	"go.cuelabs.dev/ociregistry"
@@ -93,6 +94,9 @@ type containerdBlobReader struct {
 func (br *containerdBlobReader) validate() error {
 	info, err := br.client.ContentStore().Info(br.ctx, br.desc.Digest)
 	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return ociregistry.ErrBlobUnknown
+		}
 		return err
 	}
 	// add Size/MediaType to our descriptor for poor ociregistry's sake (Content-Length/Content-Type headers)
@@ -172,14 +176,12 @@ func newContainerdBlobReaderFromDigest(ctx context.Context, client *containerd.C
 }
 
 func (r containerdRegistry) GetBlob(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
-	// TODO convert not found into proper 404 errors
 	return newContainerdBlobReaderFromDigest(ctx, r.client, digest)
 }
 
 func (r containerdRegistry) GetBlobRange(ctx context.Context, repo string, digest ociregistry.Digest, offset0, offset1 int64) (ociregistry.BlobReader, error) {
 	br, err := newContainerdBlobReaderFromDigest(ctx, r.client, digest)
 	if err != nil {
-		// TODO convert not found into proper 404 errors
 		return nil, err
 	}
 
@@ -229,7 +231,6 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	desc.MediaType = mediaTypeWrapper.MediaType
 
 	return newContainerdBlobReaderFromDescriptor(ctx, r.client, desc)
-	// TODO convert not found into proper 404 errors
 }
 
 func (r containerdRegistry) GetTag(ctx context.Context, repo string, tagName string) (ociregistry.BlobReader, error) {
@@ -296,7 +297,7 @@ func (r containerdRegistry) DeleteTag(ctx context.Context, repo string, name str
 // TODO func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id string, chunkSize int) (ociregistry.BlobWriter, error)
 
 func (r containerdRegistry) MountBlob(ctx context.Context, fromRepo, toRepo string, digest ociregistry.Digest) (ociregistry.Descriptor, error) {
-	// since we don't do per-repo blobs, this just succeeds
+	// since we don't do per-repo blobs, this just succeeds (assuming the requested blob exists)
 	return r.ResolveBlob(ctx, toRepo, digest)
 }
 
