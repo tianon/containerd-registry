@@ -140,7 +140,10 @@ func (br *containerdBlobReader) Descriptor() ociregistry.Descriptor {
 }
 
 func (br *containerdBlobReader) Close() error {
-	return br.readerAt.Close()
+	if br.readerAt != nil {
+		return br.readerAt.Close()
+	}
+	return nil
 }
 
 // containerd.Client becomes owned by the returned containerdBlobReader (or Close'd by this method on error)
