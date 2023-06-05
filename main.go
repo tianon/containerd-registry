@@ -228,6 +228,7 @@ func (_ containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	mediaTypeWrapper := struct {
 		MediaType string `json:"mediaType"`
 	}{}
+	// TODO add a limitedreader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
 	err = json.NewDecoder(content.NewReader(ra)).Decode(&mediaTypeWrapper)
 	if err != nil {
 		client.Close()
