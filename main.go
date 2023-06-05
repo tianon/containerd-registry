@@ -10,11 +10,13 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/defaults"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/reference/docker"
 
 	"go.cuelabs.dev/ociregistry"
@@ -293,7 +295,34 @@ func (r containerdRegistry) DeleteTag(ctx context.Context, repo string, name str
 	return r.client.ImageService().Delete(ctx, repo+":"+name)
 }
 
-// TODO func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ociregistry.Descriptor, r io.Reader) (ociregistry.Descriptor, error)
+func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ociregistry.Descriptor, reader io.Reader) (ociregistry.Descriptor, error) {
+	cs := r.client.ContentStore()
+
+	ingestRef := string(desc.Digest)
+
+	// explicitly "abort" the ref we're about to use in case there's a partial or failed ingest already (which content.WriteBlob will then quietly reuse, over and over)
+	_ = cs.Abort(ctx, ingestRef)
+
+	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add a generous 15 minute lease so we have time to get to it being tagged before gc takes it
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(15*time.Minute))
+	if err != nil {
+		return ociregistry.Descriptor{}, err
+	}
+
+	// WriteBlob does *not* limit reads to the provided size, so let's wrap ourselves in a LimitedReader to prevent reading (much) more than we intend
+	reader = io.LimitReader(
+		reader,
+		desc.Size+1, // +1 to allow WriteBlob to detect if it reads too much
+	)
+
+	if err := content.WriteBlob(ctx, cs, ingestRef, reader, desc); err != nil {
+		_ = cs.Abort(ctx, ingestRef)
+		_ = deleteLease(ctx)
+		return ociregistry.Descriptor{}, err
+	}
+
+	return desc, nil
+}
 
 // TODO func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id string, chunkSize int) (ociregistry.BlobWriter, error)
 
