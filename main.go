@@ -304,7 +304,7 @@ func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ocir
 	_ = cs.Abort(ctx, ingestRef)
 
 	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add a generous 15 minute lease so we have time to get to it being tagged before gc takes it
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(15*time.Minute))
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(15*time.Minute)) // TODO make this period configurable?
 	if err != nil {
 		return ociregistry.Descriptor{}, err
 	}
