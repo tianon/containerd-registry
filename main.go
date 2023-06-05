@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 
@@ -249,10 +250,17 @@ func (r containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName
 }
 
 func main() {
-	// TODO environment variables (CONTAINERD_ADDRESS, CONTAINERD_NAMESPACE)
+	containerdAddr := defaults.DefaultAddress
+	if val, ok := os.LookupEnv("CONTAINERD_ADDRESS"); ok {
+		containerdAddr = val
+	}
+	containerdNamespace := "default"
+	if val, ok := os.LookupEnv("CONTAINERD_NAMESPACE"); ok {
+		containerdNamespace = val
+	}
 	client, err := containerd.New(
-		defaults.DefaultAddress,
-		containerd.WithDefaultNamespace("default"),
+		containerdAddr,
+		containerd.WithDefaultNamespace(containerdNamespace),
 	)
 	if err != nil {
 		log.Fatal(err)
