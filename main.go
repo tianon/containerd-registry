@@ -176,6 +176,31 @@ func (r containerdRegistry) GetBlob(ctx context.Context, repo string, digest oci
 	return newContainerdBlobReaderFromDigest(ctx, r.client, digest)
 }
 
+func (r containerdRegistry) GetBlobRange(ctx context.Context, repo string, digest ociregistry.Digest, offset0, offset1 int64) (ociregistry.BlobReader, error) {
+	br, err := newContainerdBlobReaderFromDigest(ctx, r.client, digest)
+	if err != nil {
+		// TODO convert not found into proper 404 errors
+		return nil, err
+	}
+
+	requestedSize := offset1 - offset0
+	if offset1 < 0 || offset0+requestedSize > br.desc.Size {
+		// "If offset1 is negative or exceeds the actual size of the blob, GetBlobRange will return all the data starting from offset0."
+		return br, nil
+	}
+
+	ra, err := br.ensureReaderAt()
+	if err != nil {
+		br.Close()
+		return nil, err
+	}
+
+	// hack hack hack
+	br.reader = io.NewSectionReader(ra, offset0, requestedSize)
+
+	return br, nil
+}
+
 func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
 	// we can technically just return the manifest directly from the content store, but we need the "right" MediaType value for the Content-Type header (and thanks to https://github.com/opencontainers/image-spec/security/advisories/GHSA-77vh-xpmg-72qh we can safely assume manifests have "mediaType" set for us to parse this value out of or else they're manifests we don't care to support!)
 	desc := ociregistry.Descriptor{Digest: digest}
