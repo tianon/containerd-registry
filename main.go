@@ -174,7 +174,6 @@ func (r containerdRegistry) GetBlob(ctx context.Context, repo string, digest oci
 }
 
 func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest ociregistry.Digest) (ociregistry.BlobReader, error) {
-
 	// we can technically just return the manifest directly from the content store, but we need the "right" MediaType value for the Content-Type header (and thanks to https://github.com/opencontainers/image-spec/security/advisories/GHSA-77vh-xpmg-72qh we can safely assume manifests have "mediaType" set for us to parse this value out of or else they're manifests we don't care to support!)
 	desc := ociregistry.Descriptor{Digest: digest}
 
@@ -183,17 +182,22 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 		return nil, err
 	}
 	defer ra.Close()
+
+	desc.Size = ra.Size()
+
+	// wrap in a LimitedReader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
+	r := io.LimitReader(content.NewReader(ra), 4*1024*1024)
+	// 4MiB: https://github.com/opencontainers/distribution-spec/pull/293, especially https://github.com/opencontainers/distribution-spec/pull/293#issuecomment-1452780554
+
 	mediaTypeWrapper := struct {
 		MediaType string `json:"mediaType"`
 	}{}
-	// TODO add a limitedreader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
-	if err := json.NewDecoder(content.NewReader(ra)).Decode(&mediaTypeWrapper); err != nil {
+	if err := json.NewDecoder(r).Decode(&mediaTypeWrapper); err != nil {
 		return nil, err
 	}
 	if mediaTypeWrapper.MediaType == "" {
 		return nil, errors.New("failed to parse mediaType") // TODO better error
 	}
-	desc.Size = ra.Size()
 	desc.MediaType = mediaTypeWrapper.MediaType
 
 	return newContainerdBlobReaderFromDescriptor(ctx, r.client, desc)
