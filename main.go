@@ -52,7 +52,6 @@ func (r containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[s
 }
 
 func (r containerdRegistry) Tags(ctx context.Context, repo string) ociregistry.Iter[string] {
-
 	is := r.client.ImageService()
 
 	images, err := is.List(ctx, "name~="+strconv.Quote("^"+regexp.QuoteMeta(repo)+":"))
