@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,9 +17,11 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/defaults"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/reference/docker"
-
+	"github.com/google/uuid"
+	"github.com/opencontainers/go-digest"
 	"go.cuelabs.dev/ociregistry"
 	"go.cuelabs.dev/ociregistry/ociserver"
 )
@@ -97,7 +100,6 @@ func (br *containerdBlobReader) validate() error {
 	info, err := br.client.ContentStore().Info(br.ctx, br.desc.Digest)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
-			// TODO return ErrManifestUnknown when this containerdBlobReader is actually supposed to be satisfying a manifest request 😅
 			return ociregistry.ErrBlobUnknown
 		}
 		return err
@@ -212,6 +214,9 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 
 	ra, err := r.client.ContentStore().ReaderAt(ctx, desc)
 	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil, ociregistry.ErrManifestUnknown
+		}
 		return nil, err
 	}
 	defer ra.Close()
@@ -233,7 +238,11 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	}
 	desc.MediaType = mediaTypeWrapper.MediaType
 
-	return newContainerdBlobReaderFromDescriptor(ctx, r.client, desc)
+	br, err := newContainerdBlobReaderFromDescriptor(ctx, r.client, desc)
+	if err == ociregistry.ErrBlobUnknown {
+		return nil, ociregistry.ErrManifestUnknown
+	}
+	return br, err
 }
 
 func (r containerdRegistry) GetTag(ctx context.Context, repo string, tagName string) (ociregistry.BlobReader, error) {
@@ -324,14 +333,120 @@ func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ocir
 	return desc, nil
 }
 
-// TODO func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id string, chunkSize int) (ociregistry.BlobWriter, error)
+type containerdBlobWriter struct {
+	ctx context.Context
+	cs  content.Store
+	id  string
+	content.Writer
+
+	comittedSize int64
+}
+
+func (bw *containerdBlobWriter) Size() int64 {
+	if bw.comittedSize != 0 {
+		return bw.comittedSize
+	}
+	status, err := bw.Writer.Status()
+	if err != nil {
+		log.Print(err)
+		return -1 // 😭
+	}
+	return status.Offset
+}
+
+func (bw *containerdBlobWriter) ID() string {
+	return bw.id
+}
+
+func (bw *containerdBlobWriter) Commit(digest ociregistry.Digest) (ociregistry.Descriptor, error) {
+	bw.comittedSize = bw.Size() // avoid "error getting writer status: SendMsg called after CloseSend: unknown" (TODO this does not actually work!)
+	if err := bw.Writer.Commit(bw.ctx, 0, digest); err != nil {
+		return ociregistry.Descriptor{}, err
+	}
+	return ociregistry.Descriptor{
+		Digest:    digest,
+		Size:      bw.comittedSize,
+		MediaType: "application/octet-stream", // 🙈
+	}, nil
+}
+
+func (bw *containerdBlobWriter) Cancel() error {
+	if err := bw.Close(); err != nil {
+		return err
+	}
+	return bw.cs.Abort(bw.ctx, bw.id)
+}
+
+func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id string, chunkSize int) (ociregistry.BlobWriter, error) {
+	cs := r.client.ContentStore()
+
+	// if you do not have an id, one will be assigned to you
+	if id == "" {
+		if uuid, err := uuid.NewRandom(); err != nil {
+			return nil, err
+		} else {
+			id = uuid.String()
+		}
+	}
+	// (this function doesn't "Abort" like PushBlob because being able to resume partial uploads is kind of the whole point)
+
+	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add a generous 15 minute lease so we have time to get to it being tagged before gc takes it
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(15*time.Minute)) // TODO make this period configurable?
+	if err != nil {
+		return nil, err
+	}
+
+	writer, err := content.OpenWriter(ctx, cs, content.WithRef(id))
+	if err != nil {
+		_ = deleteLease(ctx)
+		return nil, err
+	}
+
+	return &containerdBlobWriter{
+		ctx:    ctx,
+		cs:     cs,
+		id:     id,
+		Writer: writer,
+	}, nil
+}
 
 func (r containerdRegistry) MountBlob(ctx context.Context, fromRepo, toRepo string, digest ociregistry.Digest) (ociregistry.Descriptor, error) {
 	// since we don't do per-repo blobs, this just succeeds (assuming the requested blob exists)
 	return r.ResolveBlob(ctx, toRepo, digest)
 }
 
-// TODO func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag string, contents []byte, mediaType string) (ociregistry.Descriptor, error)
+func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag string, contents []byte, mediaType string) (ociregistry.Descriptor, error) {
+	desc := ociregistry.Descriptor{
+		Digest:    digest.FromBytes(contents),
+		Size:      int64(len(contents)),
+		MediaType: mediaType,
+	}
+
+	if _, err := r.PushBlob(ctx, repo, desc, bytes.NewReader(contents)); err != nil {
+		return ociregistry.Descriptor{}, err
+	}
+
+	if tag != "" {
+		is := r.client.ImageService()
+		img := images.Image{
+			Name:   repo + ":" + tag,
+			Target: desc,
+		}
+		_, err := is.Update(ctx, img, "target") // "target" here is to specify that we want to update the descriptor that "Name" points to (if this image name already exists)
+		if err != nil {
+			if !errdefs.IsNotFound(err) {
+				return desc, err
+			}
+			_, err = is.Create(ctx, img)
+			if err != nil {
+				return desc, err
+			}
+		}
+		// TODO somehow this isn't enough to keep all the child objects around - need to figure out why the 15 minute leases are deleting stuff that's still referenced / in-use 😭
+	}
+
+	return desc, nil
+}
 
 func main() {
 	containerdAddr := defaults.DefaultAddress
