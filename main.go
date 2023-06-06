@@ -240,7 +240,7 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 		return nil, err
 	}
 	if mediaTypeWrapper.MediaType == "" {
-		return nil, errors.New("failed to parse mediaType") // TODO better error
+		return nil, errors.New("failed to parse mediaType from " + string(desc.Digest) + " (for Content-Type header)")
 	}
 	desc.MediaType = mediaTypeWrapper.MediaType
 
