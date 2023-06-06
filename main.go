@@ -345,17 +345,30 @@ type containerdBlobWriter struct {
 	id  string
 	content.Writer
 
-	comittedSize int64
+	closedStatus *content.Status
+}
+
+func (bw *containerdBlobWriter) cacheStatus() error {
+	// if the writer is closed, Status() fails with "error getting writer status: SendMsg called after CloseSend: unknown", but Size() might still be invoked, so we need to cache that final result *before* we close our Writer
+	status, err := bw.Writer.Status()
+	if err == nil {
+		bw.closedStatus = &status
+	}
+	return err
+}
+
+func (bw *containerdBlobWriter) Close() error {
+	return errors.Join(bw.cacheStatus(), bw.Writer.Close())
 }
 
 func (bw *containerdBlobWriter) Size() int64 {
-	if bw.comittedSize != 0 {
-		return bw.comittedSize
+	if bw.closedStatus != nil {
+		return bw.closedStatus.Offset
 	}
 	status, err := bw.Writer.Status()
 	if err != nil {
-		log.Print(err)
-		return -1 // 😭
+		log.Panic(err)
+		return -1 // TODO something better 😭
 	}
 	return status.Offset
 }
@@ -365,13 +378,16 @@ func (bw *containerdBlobWriter) ID() string {
 }
 
 func (bw *containerdBlobWriter) Commit(digest ociregistry.Digest) (ociregistry.Descriptor, error) {
-	bw.comittedSize = bw.Size() // avoid "error getting writer status: SendMsg called after CloseSend: unknown" (TODO this does not actually work!)
+	// Commit implies Close (and thus invalidates our Writer in the same way)
+	if err := bw.cacheStatus(); err != nil {
+		return ociregistry.Descriptor{}, err
+	}
 	if err := bw.Writer.Commit(bw.ctx, 0, digest); err != nil {
 		return ociregistry.Descriptor{}, err
 	}
 	return ociregistry.Descriptor{
 		Digest:    digest,
-		Size:      bw.comittedSize,
+		Size:      bw.Size(),
 		MediaType: "application/octet-stream", // 🙈
 	}, nil
 }
