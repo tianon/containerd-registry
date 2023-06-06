@@ -429,7 +429,48 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 		MediaType: mediaType,
 	}
 
-	if _, err := r.PushBlob(ctx, repo, desc, bytes.NewReader(contents)); err != nil {
+	// see https://github.com/containerd/containerd/blob/f92e576f6b3d4c6505f543967d5caeb3c1a8edc4/docs/content-flow.md, especially the "containerd.io/gc.ref.xxx" labels (which is what we need to apply here), so we need to do some parsing of the manifest
+	manifestChildren := struct {
+		// manifest, but just the fields that might point at child/related objects we should tag/protect from GC
+		// https://github.com/opencontainers/image-spec/blob/9615142d016838b5dfe7453f80af0be74feb5c7c/specs-go/v1/index.go#L27-L28
+		Manifests []ociregistry.Descriptor `json:"manifests"`
+		// https://github.com/opencontainers/image-spec/blob/9615142d016838b5dfe7453f80af0be74feb5c7c/specs-go/v1/manifest.go#L29-L37
+		Config  *ociregistry.Descriptor  `json:"config"`
+		Layers  []ociregistry.Descriptor `json:"layers"`
+		Subject *ociregistry.Descriptor  `json:"subject"`
+	}{}
+	if err := json.Unmarshal(contents, &manifestChildren); err != nil {
+		return ociregistry.Descriptor{}, err
+	}
+	labelMappings := map[string]*ociregistry.Descriptor{
+		"config":  manifestChildren.Config,
+		"subject": manifestChildren.Subject,
+	}
+	for prefix, list := range map[string][]ociregistry.Descriptor{
+		"m": manifestChildren.Manifests,
+		"l": manifestChildren.Layers,
+	} {
+		for i, d := range list {
+			d := d
+			labelMappings[prefix+"."+strconv.Itoa(i)] = &d
+		}
+	}
+	labels := map[string]string{}
+	for field, desc := range labelMappings {
+		if desc != nil {
+			labels["containerd.io/gc.ref.content."+field] = string(desc.Digest)
+		}
+	}
+
+	// see PushBlob for commentary on this
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
+	if err != nil {
+		return ociregistry.Descriptor{}, err
+	}
+	cs := r.client.ContentStore()
+	ingestRef := string(desc.Digest)
+	_ = cs.Abort(ctx, ingestRef)
+	if err := content.WriteBlob(ctx, cs, ingestRef, bytes.NewReader(contents), desc, content.WithLabels(labels)); err != nil {
 		return ociregistry.Descriptor{}, err
 	}
 
@@ -449,7 +490,10 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 				return desc, err
 			}
 		}
-		// TODO somehow this isn't enough to keep all the child objects around - need to figure out why the 15 minute leases are deleting stuff that's still referenced / in-use 😭
+		// now that we're tagged, we can proactively remove the lease for this manifest
+		if err := deleteLease(ctx); err != nil {
+			return desc, err
+		}
 	}
 
 	return desc, nil
