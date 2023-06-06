@@ -453,7 +453,7 @@ func main() {
 	if val, ok := os.LookupEnv("CONTAINERD_ADDRESS"); ok {
 		containerdAddr = val
 	}
-	containerdNamespace := "default"
+	containerdNamespace := "default" // TODO have a different mode perhaps that prefixes all repository names with a namespace (thus making all the mostly ignored "repo" arguments relevant again); ala "localhost:5000/default/docker.io/tianon/true:oci"
 	if val, ok := os.LookupEnv("CONTAINERD_NAMESPACE"); ok {
 		containerdNamespace = val
 	}
