@@ -26,6 +26,13 @@ import (
 	"go.cuelabs.dev/ociregistry/ociserver"
 )
 
+const (
+	blobLeaseExpiration = 15 * time.Minute // TODO make this period configurable?
+
+	// 4MiB: https://github.com/opencontainers/distribution-spec/pull/293, especially https://github.com/opencontainers/distribution-spec/pull/293#issuecomment-1452780554
+	manifestSizeLimit = 4 * 1024 * 1024
+)
+
 type containerdRegistry struct {
 	*ociregistry.Funcs
 	client *containerd.Client
@@ -224,8 +231,7 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	desc.Size = ra.Size()
 
 	// wrap in a LimitedReader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
-	reader := io.LimitReader(content.NewReader(ra), 4*1024*1024)
-	// 4MiB: https://github.com/opencontainers/distribution-spec/pull/293, especially https://github.com/opencontainers/distribution-spec/pull/293#issuecomment-1452780554
+	reader := io.LimitReader(content.NewReader(ra), manifestSizeLimit)
 
 	mediaTypeWrapper := struct {
 		MediaType string `json:"mediaType"`
@@ -307,8 +313,8 @@ func (r containerdRegistry) DeleteTag(ctx context.Context, repo string, name str
 func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ociregistry.Descriptor, reader io.Reader) (ociregistry.Descriptor, error) {
 	cs := r.client.ContentStore()
 
-	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add a generous 15 minute lease so we have time to get to it being tagged before gc takes it
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(15*time.Minute)) // TODO make this period configurable?
+	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add an expiring lease so we have time to get to it being tagged before gc takes it
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
 	if err != nil {
 		return ociregistry.Descriptor{}, err
 	}
@@ -390,11 +396,12 @@ func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id
 	}
 	// (this function doesn't "Abort" like PushBlob because being able to resume partial uploads is kind of the whole point)
 
-	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add a generous 15 minute lease so we have time to get to it being tagged before gc takes it
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(15*time.Minute)) // TODO make this period configurable?
+	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add an expiring lease so we have time to get to it being tagged before gc takes it
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
 	if err != nil {
 		return nil, err
 	}
+	// TODO add labels to leases so we can remove them later if we get something else that references them?
 
 	writer, err := content.OpenWriter(ctx, cs, content.WithRef(id))
 	if err != nil {
