@@ -11,8 +11,8 @@ ARG TARGETOS TARGETARCH TARGETVARIANT
 ENV GOOS=$TARGETOS GOARCH=$TARGETARCH VARIANT=$TARGETVARIANT
 
 RUN set -eux; \
-	case "$GOOS" in \
-		arm) export GOARM="$VARIANT" ;; \
+	case "$GOARCH" in \
+		arm) export GOARM="${VARIANT#v}" ;; \
 		amd64) export GOAMD64="$VARIANT" ;; \
 		*) [ -z "$VARIANT" ] ;; \
 	esac; \
