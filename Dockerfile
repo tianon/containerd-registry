@@ -21,6 +21,6 @@ RUN set -eux; \
 
 FROM --platform=$TARGETPLATFORM alpine:3.18
 
-COPY --from=build /containerd-registry /usr/local/bin/
+COPY --from=build --link /containerd-registry /usr/local/bin/
 
 CMD ["containerd-registry"]
