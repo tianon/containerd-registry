@@ -257,6 +257,15 @@ func (r containerdRegistry) GetTag(ctx context.Context, repo string, tagName str
 	img, err := is.Get(ctx, repo+":"+tagName)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
+			if repo == "sha256" && len(tagName) == 64 {
+				// this might be a digest, so let's be cute and allow repo-less "registry/sha256:xxx" references, if they're valid
+				if digest, err := digest.Parse(repo+":"+tagName); err == nil {
+					if br, err := r.GetManifest(ctx, repo, digest); err == nil {
+						return br, nil
+					}
+				}
+			}
+
 			// TODO differentiate ErrNameUnknown (repo unknown) from ErrManifestUnknown ?
 			return nil, ociregistry.ErrManifestUnknown
 		}
