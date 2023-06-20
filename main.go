@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"time"
 
+	"cuelabs.dev/go/oci/ociregistry"
+	"cuelabs.dev/go/oci/ociregistry/ociserver"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/defaults"
@@ -22,8 +24,6 @@ import (
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/google/uuid"
 	"github.com/opencontainers/go-digest"
-	"go.cuelabs.dev/ociregistry"
-	"go.cuelabs.dev/ociregistry/ociserver"
 )
 
 const (
