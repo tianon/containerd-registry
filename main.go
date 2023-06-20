@@ -49,17 +49,22 @@ func (r containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[s
 	names := []string{}
 	for _, image := range images {
 		// image.Name is a fully qualified name like "repo:tag" or "repo@digest" so we need to parse it so we can return just the repo name list
-		ref, err := docker.ParseNormalizedNamed(image.Name)
+		ref, err := docker.Parse(image.Name)
 		if err != nil {
 			// just ignore images whose names we can't parse (TODO debug log?)
 			continue
 		}
-		repo := ref.Name()
-		if len(names) > 0 && names[len(names)-1] == repo {
-			// "List" returns sorted order, so we only need to check the last item in the list to dedupe
+		if named, ok := ref.(docker.Named); !ok {
+			// TODO debug log?
 			continue
+		} else {
+			repo := named.Name()
+			if len(names) > 0 && names[len(names)-1] == repo {
+				// "List" returns sorted order, so we only need to check the last item in the list to dedupe
+				continue
+			}
+			names = append(names, repo)
 		}
-		names = append(names, repo)
 	}
 
 	return ociregistry.SliceIter[string](names)
