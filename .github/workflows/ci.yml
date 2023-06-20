@@ -16,10 +16,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
+      # build & run
       - run: docker buildx build --pull --tag containerd-registry .
       - run: |
           sudo ctr version
           test -S /run/containerd/containerd.sock
           docker run -dit --name containerd-registry --mount type=bind,src=/run/containerd/containerd.sock,dst=/run/containerd/containerd.sock,ro --publish 5000:5000 containerd-registry
+
+      # test pulling
       - run: sudo ctr content fetch docker.io/tianon/true:oci
       - run: docker run --rm localhost:5000/docker.io/tianon/true:oci
+
+      # test pushing
+      - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane copy tianon/true:yoloci localhost:5000/totally-fake-never-exists:true-yoloci
+      - run: sudo ctr run --rm totally-fake-never-exists:true-yoloci true-yoloci
+
+      # test listing
+      - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane catalog localhost:5000 | grep totally-fake-never-exists # TODO anchor this regex after fixing the bug that's normalizing the "catalog" response to "docker.io/library/totally-fake-never-exists"
+      - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane ls localhost:5000/totally-fake-never-exists | grep true-yoloci
