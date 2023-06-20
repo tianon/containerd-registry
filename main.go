@@ -259,7 +259,7 @@ func (r containerdRegistry) GetTag(ctx context.Context, repo string, tagName str
 		if errdefs.IsNotFound(err) {
 			if repo == "sha256" && len(tagName) == 64 {
 				// this might be a digest, so let's be cute and allow repo-less "registry/sha256:xxx" references, if they're valid
-				if digest, err := digest.Parse(repo+":"+tagName); err == nil {
+				if digest, err := digest.Parse(repo + ":" + tagName); err == nil {
 					if br, err := r.GetManifest(ctx, repo, digest); err == nil {
 						return br, nil
 					}

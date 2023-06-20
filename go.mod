@@ -6,6 +6,7 @@ require (
 	cuelabs.dev/go/oci/ociregistry v0.0.0-20230619213234-b9df29fcb83b
 	github.com/containerd/containerd v1.7.1
 	github.com/google/uuid v1.3.0
+	github.com/opencontainers/go-digest v1.0.0
 )
 
 require (
@@ -31,7 +32,6 @@ require (
 	github.com/moby/sys/mountinfo v0.6.2 // indirect
 	github.com/moby/sys/sequential v0.5.0 // indirect
 	github.com/moby/sys/signal v0.7.0 // indirect
-	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.0-rc2.0.20221005185240-3a7f492d3f1b // indirect
 	github.com/opencontainers/runc v1.1.5 // indirect
 	github.com/opencontainers/runtime-spec v1.1.0-rc.1 // indirect
