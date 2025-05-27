@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.5
-
 FROM --platform=$BUILDPLATFORM golang:1.20 AS build
 
 ENV CGO_ENABLED 0
