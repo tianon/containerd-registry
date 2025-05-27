@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+dir="$(dirname "$BASH_SOURCE")"
+cd "$dir"
+
 commit="$(git log -1 --format='format:%H' HEAD --)"
 
 from="$(git show "$commit:Dockerfile" | awk '$1 == "FROM" && $2 == "--platform=$TARGETPLATFORM" { from = $3 } END { print from }')" # sweep sweep sweep
