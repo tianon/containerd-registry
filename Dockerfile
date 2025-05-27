@@ -14,6 +14,7 @@ RUN set -eux; \
 	case "$GOARCH" in \
 		arm) export GOARM="${VARIANT#v}" ;; \
 		amd64) export GOAMD64="$VARIANT" ;; \
+		arm64) [ "${VARIANT:-v8}" = 'v8' ] ;; \
 		*) [ -z "$VARIANT" ] ;; \
 	esac; \
 	go env | grep -E 'OS=|ARCH=|ARM=|AMD64='; \
