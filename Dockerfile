@@ -6,7 +6,7 @@ ENV CGO_ENABLED 0
 
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN set -eux; go mod download; go mod verify
+RUN go mod download
 COPY . .
 
 ARG TARGETOS TARGETARCH TARGETVARIANT
@@ -21,7 +21,7 @@ RUN set -eux; \
 	go env | grep -E 'OS=|ARCH=|ARM=|AMD64='; \
 	go build -v -trimpath -ldflags '-d -w' -o /containerd-registry
 
-FROM --platform=$TARGETPLATFORM alpine:3.18
+FROM --platform=$TARGETPLATFORM alpine:3.21
 
 COPY --from=build --link /containerd-registry /usr/local/bin/
 
