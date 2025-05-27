@@ -20,4 +20,5 @@ GitFetch: refs/heads/main
 GitCommit: $commit
 
 Tags: latest
+Architectures: $arches
 EOF
