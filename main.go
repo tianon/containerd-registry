@@ -38,12 +38,16 @@ type containerdRegistry struct {
 	client *containerd.Client
 }
 
-func (r containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[string] {
+func (r containerdRegistry) Repositories(ctx context.Context, startAfter string) ociregistry.Seq[string] {
+	if startAfter != "" {
+		return ociregistry.ErrorSeq[string](errors.New("TODO implement startAfter in Repositories"))
+	}
+
 	is := r.client.ImageService()
 
 	images, err := is.List(ctx)
 	if err != nil {
-		return ociregistry.ErrorIter[string](err)
+		return ociregistry.ErrorSeq[string](err)
 	}
 
 	names := []string{}
@@ -67,15 +71,19 @@ func (r containerdRegistry) Repositories(ctx context.Context) ociregistry.Iter[s
 		}
 	}
 
-	return ociregistry.SliceIter[string](names)
+	return ociregistry.SliceSeq[string](names)
 }
 
-func (r containerdRegistry) Tags(ctx context.Context, repo string) ociregistry.Iter[string] {
+func (r containerdRegistry) Tags(ctx context.Context, repo string, startAfter string) ociregistry.Seq[string] {
+	if startAfter != "" {
+		return ociregistry.ErrorSeq[string](errors.New("TODO implement startAfter in Repositories"))
+	}
+
 	is := r.client.ImageService()
 
 	images, err := is.List(ctx, "name~="+strconv.Quote("^"+regexp.QuoteMeta(repo)+":"))
 	if err != nil {
-		return ociregistry.ErrorIter[string](err)
+		return ociregistry.ErrorSeq[string](err)
 	}
 
 	tags := []string{}
@@ -96,7 +104,7 @@ func (r containerdRegistry) Tags(ctx context.Context, repo string) ociregistry.I
 		}
 	}
 
-	return ociregistry.SliceIter[string](tags)
+	return ociregistry.SliceSeq[string](tags)
 }
 
 type containerdBlobReader struct {
@@ -342,7 +350,9 @@ func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ocir
 	ingestRef := string(desc.Digest)
 
 	// explicitly "abort" the ref we're about to use in case there's a partial or failed ingest already (which content.WriteBlob will then quietly reuse, over and over)
-	_ = cs.Abort(ctx, ingestRef)
+	if err := cs.Abort(ctx, ingestRef); err != nil && !errdefs.IsNotFound(err) {
+		return ociregistry.Descriptor{}, err
+	}
 
 	if err := content.WriteBlob(ctx, cs, ingestRef, reader, desc); err != nil {
 		_ = cs.Abort(ctx, ingestRef)
@@ -354,9 +364,10 @@ func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ocir
 }
 
 type containerdBlobWriter struct {
-	ctx context.Context
-	cs  content.Store
-	id  string
+	ctx       context.Context
+	cs        content.Store
+	id        string
+	chunkSize int
 	content.Writer
 
 	closedStatus *content.Status
@@ -391,6 +402,13 @@ func (bw *containerdBlobWriter) ID() string {
 	return bw.id
 }
 
+func (bw *containerdBlobWriter) ChunkSize() int {
+	if bw.chunkSize < 1 {
+		return 1
+	}
+	return bw.chunkSize
+}
+
 func (bw *containerdBlobWriter) Commit(digest ociregistry.Digest) (ociregistry.Descriptor, error) {
 	// Commit implies Close (and thus invalidates our Writer in the same way)
 	if err := bw.cacheStatus(); err != nil {
@@ -413,7 +431,16 @@ func (bw *containerdBlobWriter) Cancel() error {
 	return bw.cs.Abort(bw.ctx, bw.id)
 }
 
-func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id string, chunkSize int) (ociregistry.BlobWriter, error) {
+func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, chunkSize int) (ociregistry.BlobWriter, error) {
+	return r.PushBlobChunkedResume(ctx, repo, "", 0, chunkSize)
+}
+
+func (r containerdRegistry) PushBlobChunkedResume(ctx context.Context, repo, id string, offset int64, chunkSize int) (ociregistry.BlobWriter, error) {
+	if offset == 0 && chunkSize == 0 {
+		// TODO figure out why we don't get offset = -1 here like we should
+		offset = -1
+	}
+
 	cs := r.client.ContentStore()
 
 	// if you do not have an id, one will be assigned to you
@@ -424,7 +451,13 @@ func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id
 			id = uuid.String()
 		}
 	}
-	// (this function doesn't "Abort" like PushBlob because being able to resume partial uploads is kind of the whole point)
+
+	// (this function doesn't normally "Abort" like PushBlob because being able to resume partial uploads is kind of the whole point, but if offset is zero, that's a special case we can reset for 👀)
+	if offset == 0 {
+		if err := cs.Abort(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+			return nil, err
+		}
+	}
 
 	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add an expiring lease so we have time to get to it being tagged before gc takes it
 	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
@@ -439,11 +472,21 @@ func (r containerdRegistry) PushBlobChunked(ctx context.Context, repo string, id
 		return nil, err
 	}
 
+	// containerd doesn't support arbitrary offset jumps or out-of-order writes
+	if offset != -1 {
+		if status, err := writer.Status(); err != nil {
+			return nil, err
+		} else if offset != status.Offset {
+			return nil, errors.New("offset (" + strconv.FormatInt(offset, 10) + ") must match previous value (" + strconv.FormatInt(status.Offset, 10) + ")")
+		}
+	}
+
 	return &containerdBlobWriter{
-		ctx:    ctx,
-		cs:     cs,
-		id:     id,
-		Writer: writer,
+		ctx:       ctx,
+		cs:        cs,
+		id:        id,
+		chunkSize: chunkSize,
+		Writer:    writer,
 	}, nil
 }
 
@@ -499,7 +542,9 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 	}
 	cs := r.client.ContentStore()
 	ingestRef := string(desc.Digest)
-	_ = cs.Abort(ctx, ingestRef)
+	if err := cs.Abort(ctx, ingestRef); err != nil && !errdefs.IsNotFound(err) {
+		return ociregistry.Descriptor{}, err
+	}
 	if err := content.WriteBlob(ctx, cs, ingestRef, bytes.NewReader(contents), desc, content.WithLabels(labels)); err != nil {
 		return ociregistry.Descriptor{}, err
 	}

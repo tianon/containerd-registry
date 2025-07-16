@@ -29,9 +29,12 @@ jobs:
       - run: docker run --rm localhost:5000/docker.io/tianon/true:oci
 
       # test pushing
-      - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane copy tianon/true:yoloci localhost:5000/totally-fake-never-exists:true-yoloci
+      - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane --verbose copy tianon/true:yoloci localhost:5000/totally-fake-never-exists:true-yoloci
       - run: sudo ctr run --rm totally-fake-never-exists:true-yoloci true-yoloci
 
       # test listing
       - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane catalog localhost:5000 | grep -E '^totally-fake-never-exists$'
       - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane ls localhost:5000/totally-fake-never-exists | grep -E '^true-yoloci$'
+
+      - run: docker logs containerd-registry
+        if: always()
