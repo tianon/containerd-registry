@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"cuelabs.dev/go/oci/ociregistry"
@@ -59,16 +61,20 @@ func (r containerdRegistry) Repositories(ctx context.Context, startAfter string)
 			continue
 		} else {
 			repo := named.Name()
-			if startAfter != "" && repo <= startAfter {
-				// pagination support ("List" returns sorted order)
-				continue
-			}
 			if len(names) > 0 && names[len(names)-1] == repo {
 				// "List" returns sorted order, so we only need to check the last item in the list to dedupe
 				continue
 			}
 			names = append(names, repo)
 		}
+	}
+
+	// "If the list is not empty, the tags MUST be in lexical order (i.e. case-insensitive alphanumeric order)." (catalog doesn't exist in the OCI spec, but if it did, it would probably have the same constraints as tag listing)
+	sort.Slice(names, func(i, j int) bool { return strings.ToLower(names[i]) < strings.ToLower(names[j]) })
+
+	if startAfter != "" {
+		first := sort.Search(len(names), func(i int) bool { return names[i] > startAfter })
+		names = names[first:]
 	}
 
 	return ociregistry.SliceSeq[string](names)
@@ -96,13 +102,16 @@ func (r containerdRegistry) Tags(ctx context.Context, repo string, startAfter st
 			continue
 		}
 		if tagged, ok := ref.(docker.Tagged); ok {
-			tag := tagged.Tag()
-			if startAfter != "" && tag <= startAfter {
-				// pagination support ("List" returns sorted order)
-				continue
-			}
-			tags = append(tags, tag)
+			tags = append(tags, tagged.Tag())
 		}
+	}
+
+	// "If the list is not empty, the tags MUST be in lexical order (i.e. case-insensitive alphanumeric order)."
+	sort.Slice(tags, func(i, j int) bool { return strings.ToLower(tags[i]) < strings.ToLower(tags[j]) })
+
+	if startAfter != "" {
+		first := sort.Search(len(tags), func(i int) bool { return tags[i] > startAfter })
+		tags = tags[first:]
 	}
 
 	return ociregistry.SliceSeq[string](tags)
