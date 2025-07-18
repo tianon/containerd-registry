@@ -36,5 +36,49 @@ jobs:
       - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane catalog localhost:5000 | grep -E '^totally-fake-never-exists$'
       - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane ls localhost:5000/totally-fake-never-exists | grep -E '^true-yoloci$'
 
+      - name: OCI conformance tests
+        env:
+          # https://github.com/opencontainers/distribution-spec/tree/HEAD/conformance#readme
+          OCI_ROOT_URL: http://localhost:5000
+          OCI_NAMESPACE: oci-conformance/repo
+          OCI_CROSSMOUNT_NAMESPACE: conformance/mount
+          OCI_HIDE_SKIPPED_WORKFLOWS: 0
+          OCI_TEST_PULL: 1
+          OCI_TEST_PUSH: 1
+          OCI_TEST_CONTENT_DISCOVERY: 1
+          OCI_TEST_CONTENT_MANAGEMENT: 1
+        run: |
+          git init distribution-spec
+          cd distribution-spec
+          git remote add origin https://github.com/opencontainers/distribution-spec.git
+          git fetch origin 583e014d15418d839d67f68152bc2c83821770e0: # main
+          git checkout FETCH_HEAD
+
+          git config user.name 'Hack'
+          git config user.email 'The@Planet'
+
+          # https://github.com/opencontainers/distribution-spec/pull/582
+          git fetch origin 03b7b0b2faf0f431541a3cab6ad9bb0f49a053f4:
+          git merge FETCH_HEAD
+
+          # https://github.com/opencontainers/distribution-spec/pull/583
+          git fetch origin 8de2a0cd8adbef257a9ba19c6c2073eaa2b182cf:
+          git merge FETCH_HEAD
+
+          # https://github.com/opencontainers/distribution-spec/commit/eadcef7ba0055c6893e679e47bb54fb13374fa12
+          git fetch origin eadcef7ba0055c6893e679e47bb54fb13374fa12:
+          git merge FETCH_HEAD
+
+          cd conformance
+          commit="$(git rev-parse HEAD)"
+          CGO_ENABLED=0 go test -c -trimpath -o oci-conformance -ldflags="-X github.com/opencontainers/distribution-spec/conformance.Version=$commit"
+          ./oci-conformance
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oci-conformance
+          path: distribution-spec/conformance/report.html
+          if-no-files-found: error
+        if: always()
+
       - run: docker logs containerd-registry
         if: always()
