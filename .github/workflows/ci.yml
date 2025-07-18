@@ -48,10 +48,30 @@ jobs:
           OCI_TEST_CONTENT_DISCOVERY: 1
           OCI_TEST_CONTENT_MANAGEMENT: 1
         run: |
-          version='1.1.1' # https://github.com/opencontainers/distribution-spec/tags
-          git clone -b "v$version" --depth 1 https://github.com/opencontainers/distribution-spec.git
-          cd distribution-spec/conformance
-          CGO_ENABLED=0 go test -c -trimpath -o oci-conformance -ldflags="-X github.com/opencontainers/distribution-spec/conformance.Version=v$version"
+          git init distribution-spec
+          cd distribution-spec
+          git remote add origin https://github.com/opencontainers/distribution-spec.git
+          git fetch origin 583e014d15418d839d67f68152bc2c83821770e0: # main
+          git checkout FETCH_HEAD
+
+          git config user.name 'Hack'
+          git config user.email 'The@Planet'
+
+          # https://github.com/opencontainers/distribution-spec/pull/582
+          git fetch origin 03b7b0b2faf0f431541a3cab6ad9bb0f49a053f4:
+          git merge FETCH_HEAD
+
+          # https://github.com/opencontainers/distribution-spec/pull/583
+          git fetch origin 8de2a0cd8adbef257a9ba19c6c2073eaa2b182cf:
+          git merge FETCH_HEAD
+
+          # https://github.com/opencontainers/distribution-spec/commit/eadcef7ba0055c6893e679e47bb54fb13374fa12
+          git fetch origin eadcef7ba0055c6893e679e47bb54fb13374fa12:
+          git merge FETCH_HEAD
+
+          cd conformance
+          commit="$(git rev-parse HEAD)"
+          CGO_ENABLED=0 go test -c -trimpath -o oci-conformance -ldflags="-X github.com/opencontainers/distribution-spec/conformance.Version=$commit"
           ./oci-conformance
 
       - run: docker logs containerd-registry
