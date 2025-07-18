@@ -414,7 +414,7 @@ func (bw *containerdBlobWriter) Commit(digest ociregistry.Digest) (ociregistry.D
 	if err := bw.cacheStatus(); err != nil {
 		return ociregistry.Descriptor{}, err
 	}
-	if err := bw.Writer.Commit(bw.ctx, 0, digest); err != nil {
+	if err := bw.Writer.Commit(bw.ctx, 0, digest); err != nil && !errdefs.IsAlreadyExists(err) {
 		return ociregistry.Descriptor{}, err
 	}
 	return ociregistry.Descriptor{
@@ -452,12 +452,7 @@ func (r containerdRegistry) PushBlobChunkedResume(ctx context.Context, repo, id 
 		}
 	}
 
-	// (this function doesn't normally "Abort" like PushBlob because being able to resume partial uploads is kind of the whole point, but if offset is zero, that's a special case we can reset for 👀)
-	if offset == 0 {
-		if err := cs.Abort(ctx, id); err != nil && !errdefs.IsNotFound(err) {
-			return nil, err
-		}
-	}
+	// (this function doesn't normally "Abort" like PushBlob because being able to resume partial uploads is kind of the whole point 👀  if a blob is pushed again a second time, the status check below will catch it)
 
 	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add an expiring lease so we have time to get to it being tagged before gc takes it
 	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
@@ -477,7 +472,7 @@ func (r containerdRegistry) PushBlobChunkedResume(ctx context.Context, repo, id 
 		if status, err := writer.Status(); err != nil {
 			return nil, err
 		} else if offset != status.Offset {
-			return nil, errors.New("offset (" + strconv.FormatInt(offset, 10) + ") must match previous value (" + strconv.FormatInt(status.Offset, 10) + ")")
+			return nil, ociregistry.NewHTTPError(errors.New("offset ("+strconv.FormatInt(offset, 10)+") must match previous value ("+strconv.FormatInt(status.Offset, 10)+")"), http.StatusRequestedRangeNotSatisfiable, nil, nil)
 		}
 	}
 
