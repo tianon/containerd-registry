@@ -39,10 +39,6 @@ type containerdRegistry struct {
 }
 
 func (r containerdRegistry) Repositories(ctx context.Context, startAfter string) ociregistry.Seq[string] {
-	if startAfter != "" {
-		return ociregistry.ErrorSeq[string](errors.New("TODO implement startAfter in Repositories"))
-	}
-
 	is := r.client.ImageService()
 
 	images, err := is.List(ctx)
@@ -63,6 +59,10 @@ func (r containerdRegistry) Repositories(ctx context.Context, startAfter string)
 			continue
 		} else {
 			repo := named.Name()
+			if startAfter != "" && repo <= startAfter {
+				// pagination support ("List" returns sorted order)
+				continue
+			}
 			if len(names) > 0 && names[len(names)-1] == repo {
 				// "List" returns sorted order, so we only need to check the last item in the list to dedupe
 				continue
@@ -75,10 +75,6 @@ func (r containerdRegistry) Repositories(ctx context.Context, startAfter string)
 }
 
 func (r containerdRegistry) Tags(ctx context.Context, repo string, startAfter string) ociregistry.Seq[string] {
-	if startAfter != "" {
-		return ociregistry.ErrorSeq[string](errors.New("TODO implement startAfter in Repositories"))
-	}
-
 	is := r.client.ImageService()
 
 	images, err := is.List(ctx, "name~="+strconv.Quote("^"+regexp.QuoteMeta(repo)+":"))
@@ -100,7 +96,12 @@ func (r containerdRegistry) Tags(ctx context.Context, repo string, startAfter st
 			continue
 		}
 		if tagged, ok := ref.(docker.Tagged); ok {
-			tags = append(tags, tagged.Tag())
+			tag := tagged.Tag()
+			if startAfter != "" && tag <= startAfter {
+				// pagination support ("List" returns sorted order)
+				continue
+			}
+			tags = append(tags, tag)
 		}
 	}
 
