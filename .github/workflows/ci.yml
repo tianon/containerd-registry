@@ -36,5 +36,23 @@ jobs:
       - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane catalog localhost:5000 | grep -E '^totally-fake-never-exists$'
       - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane ls localhost:5000/totally-fake-never-exists | grep -E '^true-yoloci$'
 
+      - name: OCI conformance tests
+        env:
+          # https://github.com/opencontainers/distribution-spec/tree/HEAD/conformance#readme
+          OCI_ROOT_URL: http://localhost:5000
+          OCI_NAMESPACE: oci-conformance/repo
+          OCI_CROSSMOUNT_NAMESPACE: conformance/mount
+          OCI_HIDE_SKIPPED_WORKFLOWS: 0
+          OCI_TEST_PULL: 1
+          OCI_TEST_PUSH: 1
+          OCI_TEST_CONTENT_DISCOVERY: 1
+          OCI_TEST_CONTENT_MANAGEMENT: 1
+        run: |
+          version='1.1.1' # https://github.com/opencontainers/distribution-spec/tags
+          git clone -b "v$version" --depth 1 https://github.com/opencontainers/distribution-spec.git
+          cd distribution-spec/conformance
+          CGO_ENABLED=0 go test -c -trimpath -o oci-conformance -ldflags="-X github.com/opencontainers/distribution-spec/conformance.Version=v$version"
+          ./oci-conformance
+
       - run: docker logs containerd-registry
         if: always()
