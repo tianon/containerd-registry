@@ -73,6 +73,12 @@ jobs:
           commit="$(git rev-parse HEAD)"
           CGO_ENABLED=0 go test -c -trimpath -o oci-conformance -ldflags="-X github.com/opencontainers/distribution-spec/conformance.Version=$commit"
           ./oci-conformance
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oci-conformance
+          path: distribution-spec/conformance/report.html
+          if-no-files-found: error
+        if: always()
 
       - run: docker logs containerd-registry
         if: always()
