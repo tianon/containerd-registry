@@ -522,7 +522,7 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 	}
 	labelMappings := map[string]*ociregistry.Descriptor{
 		"config":  manifestChildren.Config,
-		"subject": manifestChildren.Subject,
+		"subject": manifestChildren.Subject, // see below for where this gets a more correct "reverse" GC arrow
 	}
 	for prefix, list := range map[string][]ociregistry.Descriptor{
 		"m": manifestChildren.Manifests,
@@ -538,6 +538,10 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 		if desc != nil {
 			labels["containerd.io/gc.ref.content."+field] = string(desc.Digest)
 		}
+	}
+	// https://github.com/containerd/containerd/pull/12025
+	if manifestChildren.Subject != nil {
+		labels["containerd.io/gc.bref.content.subject"] = string(manifestChildren.Subject.Digest)
 	}
 
 	// see PushBlob for commentary on this
