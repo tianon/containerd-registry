@@ -601,10 +601,14 @@ func main() {
 	}
 	defer client.Close()
 
+	listenAddr := ":5000"
+	if val, ok := os.LookupEnv("LISTEN_ADDRESS"); ok {
+		listenAddr = val
+	}
+
 	server := ociserver.New(&containerdRegistry{
 		client: client,
 	}, nil)
-	println("listening on http://*:5000")
-	// TODO listen address/port should be configurable somehow (https://stackoverflow.com/a/76204448/433558)
-	log.Fatal(http.ListenAndServe(":5000", server))
+	log.Printf("listening on %s", listenAddr)
+	log.Fatal(http.ListenAndServe(listenAddr, server))
 }

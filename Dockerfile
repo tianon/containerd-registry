@@ -24,4 +24,7 @@ FROM --platform=$TARGETPLATFORM alpine:3.21
 
 COPY --from=build --link /containerd-registry /usr/local/bin/
 
+# Default listen address (can be overridden with -e LISTEN_ADDRESS=127.0.0.1:5000)
+ENV LISTEN_ADDRESS=":5000"
+
 CMD ["containerd-registry"]
