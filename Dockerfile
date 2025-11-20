@@ -28,6 +28,10 @@ COPY --from=build --link /containerd-registry /usr/local/bin/
 # Listen address (default: ":5000")
 ENV LISTEN_ADDRESS=":5000"
 
+# Logging configuration
+# Log format: "text" for human-readable, "json" for structured logging (default: "text")
+ENV LOG_FORMAT="text"
+
 # HTTP timeout configuration (use Go duration format: "5m", "30s", etc.)
 # Read timeout for incoming requests (default: "5m")
 ENV READ_TIMEOUT="5m"

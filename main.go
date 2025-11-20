@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -29,6 +30,140 @@ import (
 	"github.com/google/uuid"
 	"github.com/opencontainers/go-digest"
 )
+
+// responseWriter wraps http.ResponseWriter to capture status code and bytes written
+type responseWriter struct {
+	http.ResponseWriter
+	status      int
+	bytes       int64
+	wroteHeader bool
+}
+
+func (rw *responseWriter) WriteHeader(status int) {
+	if !rw.wroteHeader {
+		rw.status = status
+		rw.ResponseWriter.WriteHeader(status)
+		rw.wroteHeader = true
+	}
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if !rw.wroteHeader {
+		rw.WriteHeader(http.StatusOK)
+	}
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytes += int64(n)
+	return n, err
+}
+
+// logRequest logs an HTTP request in the specified format
+func logRequest(format string, method, path, remoteAddr string, status int, duration time.Duration, bytesWritten int64) {
+	if format == "json" {
+		entry := map[string]interface{}{
+			"time":        time.Now().UTC().Format(time.RFC3339),
+			"method":      method,
+			"path":        path,
+			"remote":      remoteAddr,
+			"status":      status,
+			"duration_ms": duration.Milliseconds(),
+			"bytes":       bytesWritten,
+		}
+
+		if status >= 500 {
+			entry["level"] = "error"
+		} else if status >= 400 {
+			entry["level"] = "warn"
+		} else {
+			entry["level"] = "info"
+		}
+
+		jsonBytes, _ := json.Marshal(entry)
+		fmt.Println(string(jsonBytes))
+	} else {
+		// Text format (default)
+		levelStr := "INFO "
+		if status >= 500 {
+			levelStr = "ERROR"
+		} else if status >= 400 {
+			levelStr = "WARN "
+		}
+
+		durationStr := formatDuration(duration)
+		bytesStr := formatBytes(bytesWritten)
+
+		fmt.Printf("%s %s %s %s %d %s %s\n",
+			time.Now().Format("2006-01-02 15:04:05"),
+			levelStr,
+			method,
+			path,
+			status,
+			durationStr,
+			bytesStr,
+		)
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Millisecond {
+		return fmt.Sprintf("%.2fms", float64(d.Microseconds())/1000.0)
+	} else if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+func formatBytes(bytes int64) string {
+	if bytes == 0 {
+		return "-"
+	} else if bytes < 1024 {
+		return fmt.Sprintf("%dB", bytes)
+	} else if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1fKB", float64(bytes)/1024.0)
+	} else if bytes < 1024*1024*1024 {
+		return fmt.Sprintf("%.1fMB", float64(bytes)/(1024.0*1024.0))
+	}
+	return fmt.Sprintf("%.2fGB", float64(bytes)/(1024.0*1024.0*1024.0))
+}
+
+// loggingMiddleware logs all HTTP requests
+func loggingMiddleware(format string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+
+			// Wrap response writer to capture status and bytes
+			wrapped := &responseWriter{
+				ResponseWriter: w,
+				status:         200, // default status
+			}
+
+			// Call next handler
+			next.ServeHTTP(wrapped, r)
+
+			// Log the request
+			duration := time.Since(start)
+			logRequest(format, r.Method, r.URL.Path, r.RemoteAddr, wrapped.status, duration, wrapped.bytes)
+		})
+	}
+}
+
+// readyzHandler checks if containerd is connected and ready
+func readyzHandler(client *containerd.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		// Try to get containerd version as a health check
+		if _, err := client.Version(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, "containerd not ready: %v\n", err)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "OK")
+	}
+}
 
 type containerdRegistry struct {
 	*ociregistry.Funcs
@@ -648,6 +783,12 @@ func main() {
 	}
 	defer client.Close()
 
+	// Logging configuration
+	logFormat := "text" // default to human-readable format
+	if val, ok := os.LookupEnv("LOG_FORMAT"); ok {
+		logFormat = strings.ToLower(val)
+	}
+
 	// Create registry with configuration
 	registry := &containerdRegistry{
 		client:              client,
@@ -655,7 +796,16 @@ func main() {
 		manifestSizeLimit:   manifestSizeLimit,
 	}
 
-	handler := ociserver.New(registry, nil)
+	// Create OCI registry handler
+	ociHandler := ociserver.New(registry, nil)
+
+	// Create mux to handle both /readyz and registry endpoints
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", readyzHandler(client))
+	mux.Handle("/", ociHandler)
+
+	// Wrap with logging middleware
+	handler := loggingMiddleware(logFormat)(mux)
 
 	// Create HTTP server with timeouts
 	srv := &http.Server{
