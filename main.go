@@ -401,8 +401,10 @@ func (bw *containerdBlobWriter) Size() int64 {
 	}
 	status, err := bw.Writer.Status()
 	if err != nil {
-		log.Panic(err)
-		return -1 // TODO something better 😭
+		// Log error instead of panicking to avoid crashing the entire server
+		// This should rarely happen as cacheStatus() is called before Size() in normal flow
+		log.Printf("error getting blob writer status: %v, returning 0", err)
+		return 0
 	}
 	return status.Offset
 }
