@@ -9,10 +9,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"cuelabs.dev/go/oci/ociregistry"
@@ -28,16 +30,13 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-const (
-	blobLeaseExpiration = 15 * time.Minute // TODO make this period configurable?
-
-	// 4MiB: https://github.com/opencontainers/distribution-spec/pull/293, especially https://github.com/opencontainers/distribution-spec/pull/293#issuecomment-1452780554
-	manifestSizeLimit = 4 * 1024 * 1024
-)
-
 type containerdRegistry struct {
 	*ociregistry.Funcs
 	client *containerd.Client
+
+	// Configurable limits and timeouts
+	blobLeaseExpiration time.Duration
+	manifestSizeLimit   int64
 }
 
 func (r containerdRegistry) Repositories(ctx context.Context, startAfter string) ociregistry.Seq[string] {
@@ -254,7 +253,7 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	desc.Size = ra.Size()
 
 	// wrap in a LimitedReader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
-	reader := io.LimitReader(content.NewReader(ra), manifestSizeLimit)
+	reader := io.LimitReader(content.NewReader(ra), r.manifestSizeLimit)
 
 	mediaTypeWrapper := struct {
 		MediaType string `json:"mediaType"`
@@ -346,7 +345,7 @@ func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ocir
 	cs := r.client.ContentStore()
 
 	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add an expiring lease so we have time to get to it being tagged before gc takes it
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(r.blobLeaseExpiration))
 	if err != nil {
 		return ociregistry.Descriptor{}, err
 	}
@@ -465,7 +464,7 @@ func (r containerdRegistry) PushBlobChunkedResume(ctx context.Context, repo, id 
 	// (this function doesn't normally "Abort" like PushBlob because being able to resume partial uploads is kind of the whole point 👀  if a blob is pushed again a second time, the status check below will catch it)
 
 	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add an expiring lease so we have time to get to it being tagged before gc takes it
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(r.blobLeaseExpiration))
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +544,7 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 	}
 
 	// see PushBlob for commentary on this
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(r.blobLeaseExpiration))
 	if err != nil {
 		return ociregistry.Descriptor{}, err
 	}
@@ -583,7 +582,28 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 	return desc, nil
 }
 
+func parseDuration(key string, defaultValue time.Duration) time.Duration {
+	if val, ok := os.LookupEnv(key); ok {
+		if d, err := time.ParseDuration(val); err == nil {
+			return d
+		}
+		log.Printf("invalid %s value %q, using default %v", key, val, defaultValue)
+	}
+	return defaultValue
+}
+
+func parseInt64(key string, defaultValue int64) int64 {
+	if val, ok := os.LookupEnv(key); ok {
+		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return i
+		}
+		log.Printf("invalid %s value %q, using default %d", key, val, defaultValue)
+	}
+	return defaultValue
+}
+
 func main() {
+	// Containerd configuration
 	containerdAddr := defaults.DefaultAddress
 	if val, ok := os.LookupEnv("CONTAINERD_ADDRESS"); ok {
 		containerdAddr = val
@@ -592,6 +612,31 @@ func main() {
 	if val, ok := os.LookupEnv("CONTAINERD_NAMESPACE"); ok {
 		containerdNamespace = val
 	}
+
+	// Server configuration
+	listenAddr := ":5000"
+	if val, ok := os.LookupEnv("LISTEN_ADDRESS"); ok {
+		listenAddr = val
+	}
+
+	// Timeout configuration
+	// Default read timeout: 5 minutes (for large image pulls)
+	readTimeout := parseDuration("READ_TIMEOUT", 5*time.Minute)
+	// Default write timeout: 5 minutes (for large image pushes)
+	writeTimeout := parseDuration("WRITE_TIMEOUT", 5*time.Minute)
+	// Default idle timeout: 120 seconds
+	idleTimeout := parseDuration("IDLE_TIMEOUT", 120*time.Second)
+	// Default shutdown timeout: 30 seconds
+	shutdownTimeout := parseDuration("SHUTDOWN_TIMEOUT", 30*time.Second)
+
+	// Limit configuration
+	// Default: 15 minutes for blob lease expiration
+	blobLeaseExpiration := parseDuration("BLOB_LEASE_EXPIRATION", 15*time.Minute)
+	// Default: 4 MiB manifest size limit
+	// https://github.com/opencontainers/distribution-spec/pull/293
+	manifestSizeLimit := parseInt64("MAX_MANIFEST_SIZE", 4*1024*1024)
+
+	// Initialize containerd client
 	client, err := containerd.New(
 		containerdAddr,
 		containerd.WithDefaultNamespace(containerdNamespace),
@@ -601,14 +646,48 @@ func main() {
 	}
 	defer client.Close()
 
-	listenAddr := ":5000"
-	if val, ok := os.LookupEnv("LISTEN_ADDRESS"); ok {
-		listenAddr = val
+	// Create registry with configuration
+	registry := &containerdRegistry{
+		client:              client,
+		blobLeaseExpiration: blobLeaseExpiration,
+		manifestSizeLimit:   manifestSizeLimit,
 	}
 
-	server := ociserver.New(&containerdRegistry{
-		client: client,
-	}, nil)
-	log.Printf("listening on %s", listenAddr)
-	log.Fatal(http.ListenAndServe(listenAddr, server))
+	handler := ociserver.New(registry, nil)
+
+	// Create HTTP server with timeouts
+	srv := &http.Server{
+		Addr:         listenAddr,
+		Handler:      handler,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
+	}
+
+	// Setup graceful shutdown with signal handling
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("listening on %s", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	<-ctx.Done()
+	log.Println("shutting down gracefully, press Ctrl+C again to force")
+
+	// Create shutdown context with timeout
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	// Attempt graceful shutdown
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server forced to shutdown: %v", err)
+	}
+
+	log.Println("server stopped")
 }
