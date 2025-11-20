@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"cuelabs.dev/go/oci/ociregistry"
@@ -28,16 +31,147 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-const (
-	blobLeaseExpiration = 15 * time.Minute // TODO make this period configurable?
+// responseWriter wraps http.ResponseWriter to capture status code and bytes written
+type responseWriter struct {
+	http.ResponseWriter
+	status      int
+	bytes       int64
+	wroteHeader bool
+}
 
-	// 4MiB: https://github.com/opencontainers/distribution-spec/pull/293, especially https://github.com/opencontainers/distribution-spec/pull/293#issuecomment-1452780554
-	manifestSizeLimit = 4 * 1024 * 1024
-)
+func (rw *responseWriter) WriteHeader(status int) {
+	if !rw.wroteHeader {
+		rw.status = status
+		rw.ResponseWriter.WriteHeader(status)
+		rw.wroteHeader = true
+	}
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if !rw.wroteHeader {
+		rw.WriteHeader(http.StatusOK)
+	}
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytes += int64(n)
+	return n, err
+}
+
+// logRequest logs an HTTP request in the specified format
+func logRequest(format string, method, path, remoteAddr string, status int, duration time.Duration, bytesWritten int64) {
+	if format == "json" {
+		entry := map[string]interface{}{
+			"time":        time.Now().UTC().Format(time.RFC3339),
+			"method":      method,
+			"path":        path,
+			"remote":      remoteAddr,
+			"status":      status,
+			"duration_ms": duration.Milliseconds(),
+			"bytes":       bytesWritten,
+		}
+
+		if status >= 500 {
+			entry["level"] = "error"
+		} else if status >= 400 {
+			entry["level"] = "warn"
+		} else {
+			entry["level"] = "info"
+		}
+
+		jsonBytes, _ := json.Marshal(entry)
+		fmt.Println(string(jsonBytes))
+	} else {
+		// Text format (default)
+		levelStr := "INFO "
+		if status >= 500 {
+			levelStr = "ERROR"
+		} else if status >= 400 {
+			levelStr = "WARN "
+		}
+
+		durationStr := formatDuration(duration)
+		bytesStr := formatBytes(bytesWritten)
+
+		fmt.Printf("%s %s %s %s %d %s %s\n",
+			time.Now().Format("2006-01-02 15:04:05"),
+			levelStr,
+			method,
+			path,
+			status,
+			durationStr,
+			bytesStr,
+		)
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Millisecond {
+		return fmt.Sprintf("%.2fms", float64(d.Microseconds())/1000.0)
+	} else if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+func formatBytes(bytes int64) string {
+	if bytes == 0 {
+		return "-"
+	} else if bytes < 1024 {
+		return fmt.Sprintf("%dB", bytes)
+	} else if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1fKB", float64(bytes)/1024.0)
+	} else if bytes < 1024*1024*1024 {
+		return fmt.Sprintf("%.1fMB", float64(bytes)/(1024.0*1024.0))
+	}
+	return fmt.Sprintf("%.2fGB", float64(bytes)/(1024.0*1024.0*1024.0))
+}
+
+// loggingMiddleware logs all HTTP requests
+func loggingMiddleware(format string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+
+			// Wrap response writer to capture status and bytes
+			wrapped := &responseWriter{
+				ResponseWriter: w,
+				status:         200, // default status
+			}
+
+			// Call next handler
+			next.ServeHTTP(wrapped, r)
+
+			// Log the request
+			duration := time.Since(start)
+			logRequest(format, r.Method, r.URL.Path, r.RemoteAddr, wrapped.status, duration, wrapped.bytes)
+		})
+	}
+}
+
+// readyzHandler checks if containerd is connected and ready
+func readyzHandler(client *containerd.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		// Try to get containerd version as a health check
+		if _, err := client.Version(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, "containerd not ready: %v\n", err)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "OK")
+	}
+}
 
 type containerdRegistry struct {
 	*ociregistry.Funcs
 	client *containerd.Client
+
+	// Configurable limits and timeouts
+	blobLeaseExpiration time.Duration
+	manifestSizeLimit   int64
 }
 
 func (r containerdRegistry) Repositories(ctx context.Context, startAfter string) ociregistry.Seq[string] {
@@ -254,7 +388,7 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	desc.Size = ra.Size()
 
 	// wrap in a LimitedReader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
-	reader := io.LimitReader(content.NewReader(ra), manifestSizeLimit)
+	reader := io.LimitReader(content.NewReader(ra), r.manifestSizeLimit)
 
 	mediaTypeWrapper := struct {
 		MediaType string `json:"mediaType"`
@@ -346,7 +480,7 @@ func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ocir
 	cs := r.client.ContentStore()
 
 	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add an expiring lease so we have time to get to it being tagged before gc takes it
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(r.blobLeaseExpiration))
 	if err != nil {
 		return ociregistry.Descriptor{}, err
 	}
@@ -402,8 +536,10 @@ func (bw *containerdBlobWriter) Size() int64 {
 	}
 	status, err := bw.Writer.Status()
 	if err != nil {
-		log.Panic(err)
-		return -1 // TODO something better 😭
+		// Log error instead of panicking to avoid crashing the entire server
+		// This should rarely happen as cacheStatus() is called before Size() in normal flow
+		log.Printf("error getting blob writer status: %v, returning 0", err)
+		return 0
 	}
 	return status.Offset
 }
@@ -465,7 +601,7 @@ func (r containerdRegistry) PushBlobChunkedResume(ctx context.Context, repo, id 
 	// (this function doesn't normally "Abort" like PushBlob because being able to resume partial uploads is kind of the whole point 👀  if a blob is pushed again a second time, the status check below will catch it)
 
 	// since we don't know how soon this blob might be part of a tagged manifest (if ever), add an expiring lease so we have time to get to it being tagged before gc takes it
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(r.blobLeaseExpiration))
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +681,7 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 	}
 
 	// see PushBlob for commentary on this
-	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(blobLeaseExpiration))
+	ctx, deleteLease, err := r.client.WithLease(ctx, leases.WithExpiration(r.blobLeaseExpiration))
 	if err != nil {
 		return ociregistry.Descriptor{}, err
 	}
@@ -583,7 +719,28 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 	return desc, nil
 }
 
+func parseDuration(key string, defaultValue time.Duration) time.Duration {
+	if val, ok := os.LookupEnv(key); ok {
+		if d, err := time.ParseDuration(val); err == nil {
+			return d
+		}
+		log.Printf("invalid %s value %q, using default %v", key, val, defaultValue)
+	}
+	return defaultValue
+}
+
+func parseInt64(key string, defaultValue int64) int64 {
+	if val, ok := os.LookupEnv(key); ok {
+		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return i
+		}
+		log.Printf("invalid %s value %q, using default %d", key, val, defaultValue)
+	}
+	return defaultValue
+}
+
 func main() {
+	// Containerd configuration
 	containerdAddr := defaults.DefaultAddress
 	if val, ok := os.LookupEnv("CONTAINERD_ADDRESS"); ok {
 		containerdAddr = val
@@ -592,6 +749,31 @@ func main() {
 	if val, ok := os.LookupEnv("CONTAINERD_NAMESPACE"); ok {
 		containerdNamespace = val
 	}
+
+	// Server configuration
+	listenAddr := ":5000"
+	if val, ok := os.LookupEnv("LISTEN_ADDRESS"); ok {
+		listenAddr = val
+	}
+
+	// Timeout configuration
+	// Default read timeout: 5 minutes (for large image pulls)
+	readTimeout := parseDuration("READ_TIMEOUT", 5*time.Minute)
+	// Default write timeout: 5 minutes (for large image pushes)
+	writeTimeout := parseDuration("WRITE_TIMEOUT", 5*time.Minute)
+	// Default idle timeout: 120 seconds
+	idleTimeout := parseDuration("IDLE_TIMEOUT", 120*time.Second)
+	// Default shutdown timeout: 30 seconds
+	shutdownTimeout := parseDuration("SHUTDOWN_TIMEOUT", 30*time.Second)
+
+	// Limit configuration
+	// Default: 15 minutes for blob lease expiration
+	blobLeaseExpiration := parseDuration("BLOB_LEASE_EXPIRATION", 15*time.Minute)
+	// Default: 4 MiB manifest size limit
+	// https://github.com/opencontainers/distribution-spec/pull/293
+	manifestSizeLimit := parseInt64("MAX_MANIFEST_SIZE", 4*1024*1024)
+
+	// Initialize containerd client
 	client, err := containerd.New(
 		containerdAddr,
 		containerd.WithDefaultNamespace(containerdNamespace),
@@ -601,10 +783,63 @@ func main() {
 	}
 	defer client.Close()
 
-	server := ociserver.New(&containerdRegistry{
-		client: client,
-	}, nil)
-	println("listening on http://*:5000")
-	// TODO listen address/port should be configurable somehow (https://stackoverflow.com/a/76204448/433558)
-	log.Fatal(http.ListenAndServe(":5000", server))
+	// Logging configuration
+	logFormat := "text" // default to human-readable format
+	if val, ok := os.LookupEnv("LOG_FORMAT"); ok {
+		logFormat = strings.ToLower(val)
+	}
+
+	// Create registry with configuration
+	registry := &containerdRegistry{
+		client:              client,
+		blobLeaseExpiration: blobLeaseExpiration,
+		manifestSizeLimit:   manifestSizeLimit,
+	}
+
+	// Create OCI registry handler
+	ociHandler := ociserver.New(registry, nil)
+
+	// Create mux to handle both /readyz and registry endpoints
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", readyzHandler(client))
+	mux.Handle("/", ociHandler)
+
+	// Wrap with logging middleware
+	handler := loggingMiddleware(logFormat)(mux)
+
+	// Create HTTP server with timeouts
+	srv := &http.Server{
+		Addr:         listenAddr,
+		Handler:      handler,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
+	}
+
+	// Setup graceful shutdown with signal handling
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("listening on %s", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	<-ctx.Done()
+	log.Println("shutting down gracefully, press Ctrl+C again to force")
+
+	// Create shutdown context with timeout
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	// Attempt graceful shutdown
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server forced to shutdown: %v", err)
+	}
+
+	log.Println("server stopped")
 }
