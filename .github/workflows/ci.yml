@@ -36,40 +36,23 @@ jobs:
       - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane catalog localhost:5000 | grep -E '^totally-fake-never-exists$'
       - run: docker run --rm --network=container:containerd-registry gcr.io/go-containerregistry/crane ls localhost:5000/totally-fake-never-exists | grep -E '^true-yoloci$'
 
+      # TODO hacking in https://github.com/opencontainers/distribution-spec/pull/588 for Brandon's test rewrite 👀
+      # TODO https://github.com/sudo-bmitch/distribution-spec/tree/pr-conformance-v2
       - name: OCI conformance tests
         env:
-          # https://github.com/opencontainers/distribution-spec/tree/HEAD/conformance#readme
-          OCI_ROOT_URL: http://localhost:5000
-          OCI_NAMESPACE: oci-conformance/repo
-          OCI_CROSSMOUNT_NAMESPACE: conformance/mount
-          OCI_HIDE_SKIPPED_WORKFLOWS: 0
-          OCI_TEST_PULL: 1
-          OCI_TEST_PUSH: 1
-          OCI_TEST_CONTENT_DISCOVERY: 1
-          OCI_TEST_CONTENT_MANAGEMENT: 1
+          OCI_CONFIGURATION: oci-conformance.yml
         run: |
-          git init distribution-spec
-          cd distribution-spec
-          git remote add origin https://github.com/opencontainers/distribution-spec.git
-          git fetch origin 5e57cc0a07ea002e507a65d4757e823f133fcb52: # main
-          git checkout FETCH_HEAD
-
-          git config user.name 'Hack'
-          git config user.email 'The@Planet'
-
-          # https://github.com/opencontainers/distribution-spec/commit/eadcef7ba0055c6893e679e47bb54fb13374fa12
-          git fetch origin eadcef7ba0055c6893e679e47bb54fb13374fa12:
-          git merge FETCH_HEAD
-
-          cd conformance
-          commit="$(git rev-parse HEAD)"
-          CGO_ENABLED=0 go test -c -trimpath -o oci-conformance -ldflags="-X github.com/opencontainers/distribution-spec/conformance.Version=$commit"
-          ./oci-conformance
+          git init dist-spec
+          git -C dist-spec remote add origin https://github.com/opencontainers/distribution-spec.git
+          git -C dist-spec fetch origin d4010d8a469b7c89a1d0938379654a39805f77f9: # main
+          git -C dist-spec checkout FETCH_HEAD
+          ( cd dist-spec/conformance && CGO_ENABLED=0 go build -o conformance )
+          ./dist-spec/conformance/conformance
       - uses: actions/upload-artifact@v7
         with:
           name: oci-conformance
           archive: false
-          path: distribution-spec/conformance/report.html
+          path: results/report.html
           if-no-files-found: error
         if: always()
 
