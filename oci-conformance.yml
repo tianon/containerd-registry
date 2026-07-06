@@ -1,0 +1,14 @@
+tls: disabled
+apis:
+  blobs:
+    digestHeader: true
+  manifests:
+    digestHeader: true
+data:
+  # TODO implement sha512 (requires containerd to support it first 😭)
+  # $ ctr content fetch docker.io/tianon/test:sha512-blobs
+  # docker.io/tianon/test:sha512-blobs:                                               resolved       |++++++++++++++++++++++++++++++++++++++|
+  # manifest-sha256:3aeaae15b975d380c89b18aa9694dbb690af663575ac746a8a6db90015550295: downloading    |--------------------------------------|    0.0 B/1.3 KiB
+  # elapsed: 1.1 s                                                                    total:   0.0 B (0.0 B/s)
+  # ctr: failed commit on ref "layer-sha512:bae9ebc21672534b4a4014540b89e9b851ba90e091f3adb929a99ef575fe86ddef8584327630501f65636bc587c8b999cd4ca5f9200166abe15dc82f05f2ffca": commit failed: unexpected commit digest sha256:1c51fc286aa95d9413226599576bafa38490b1e292375c90de095855b64caea6, expected sha512:bae9ebc21672534b4a4014540b89e9b851ba90e091f3adb929a99ef575fe86ddef8584327630501f65636bc587c8b999cd4ca5f9200166abe15dc82f05f2ffca: failed precondition
+  sha512: false

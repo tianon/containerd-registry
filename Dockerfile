@@ -1,6 +1,7 @@
 FROM --platform=$BUILDPLATFORM golang:1.25 AS build
 
 ENV CGO_ENABLED 0
+ENV GOCACHE /go/cache
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -10,7 +11,8 @@ COPY . .
 ARG TARGETOS TARGETARCH TARGETVARIANT
 ENV GOOS=$TARGETOS GOARCH=$TARGETARCH VARIANT=$TARGETVARIANT
 
-RUN set -eux; \
+RUN --mount=type=cache,target=$GOCACHE \
+	set -eux; \
 	case "$GOARCH" in \
 		arm) export GOARM="${VARIANT#v}" ;; \
 		amd64) export GOAMD64="$VARIANT" ;; \

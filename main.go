@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"iter"
 	"log"
 	"net/http"
 	"os"
@@ -40,7 +42,7 @@ type containerdRegistry struct {
 	client *containerd.Client
 }
 
-func (r containerdRegistry) Repositories(ctx context.Context, startAfter string) ociregistry.Seq[string] {
+func (r containerdRegistry) Repositories(ctx context.Context, startAfter string) iter.Seq2[string, error] {
 	is := r.client.ImageService()
 
 	images, err := is.List(ctx)
@@ -80,7 +82,7 @@ func (r containerdRegistry) Repositories(ctx context.Context, startAfter string)
 	return ociregistry.SliceSeq[string](names)
 }
 
-func (r containerdRegistry) Tags(ctx context.Context, repo string, startAfter string) ociregistry.Seq[string] {
+func (r containerdRegistry) Tags(ctx context.Context, repo string, startAfter string) iter.Seq2[string, error] {
 	is := r.client.ImageService()
 
 	images, err := is.List(ctx, "name~="+strconv.Quote("^"+regexp.QuoteMeta(repo)+":"))
@@ -117,6 +119,61 @@ func (r containerdRegistry) Tags(ctx context.Context, repo string, startAfter st
 	return ociregistry.SliceSeq[string](tags)
 }
 
+func (r containerdRegistry) Referrers(ctx context.Context, repo string, digest ociregistry.Digest, artifactType string) iter.Seq2[ociregistry.Descriptor, error] {
+	yieldBreak := errors.New("break " + string(digest))
+	return func(yield func(ociregistry.Descriptor, error) bool) {
+		cs := r.client.ContentStore()
+		err := cs.Walk(ctx, func(info content.Info) error {
+			// TODO we should really pull "artifactType" and "mediaType" up into labels so we don't have to fetch/parse the manifest here to get them -- maybe even annotations?
+			desc := ociregistry.Descriptor{
+				Digest: info.Digest,
+				Size:   info.Size,
+			}
+			ra, err := cs.ReaderAt(ctx, desc)
+			if err != nil {
+				if !yield(ociregistry.Descriptor{}, err) {
+					return yieldBreak
+				}
+				return nil
+			}
+			// wrap in a LimitedReader here to make sure we don't read an enormous amount of valid but useless JSON that DoS's us
+			reader := io.LimitReader(content.NewReader(ra), manifestSizeLimit)
+			fields := struct {
+				MediaType    string `json:"mediaType"`
+				ArtifactType string `json:"artifactType"`
+				Config       struct {
+					// for the fallback ("If the artifactType is empty or missing in the image manifest, the value of artifactType MUST be set to the config descriptor mediaType value.")
+					MediaType string `json:"mediaType"`
+				} `json:"config"`
+				Annotations map[string]string `json:"annotations"`
+			}{}
+			if err := json.NewDecoder(reader).Decode(&fields); err != nil {
+				if !yield(ociregistry.Descriptor{}, err) {
+					return yieldBreak
+				}
+				return nil
+			}
+			desc.MediaType = fields.MediaType
+			desc.ArtifactType = cmp.Or(fields.ArtifactType, fields.Config.MediaType)
+			desc.Annotations = fields.Annotations
+			if artifactType != "" && desc.ArtifactType != artifactType {
+				return nil
+			}
+			if !yield(desc, nil) {
+				return yieldBreak
+			}
+			return nil
+		}, `labels."containerd.io/gc.bref.content.subject"==`+strconv.Quote(string(digest)))
+		if err == yieldBreak {
+			return
+		}
+		if err != nil {
+			yield(ociregistry.Descriptor{}, err)
+			return
+		}
+	}
+}
+
 type containerdBlobReader struct {
 	client *containerd.Client
 	ctx    context.Context
@@ -130,7 +187,7 @@ func (br *containerdBlobReader) validate() error {
 	info, err := br.client.ContentStore().Info(br.ctx, br.desc.Digest)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
-			return ociregistry.ErrBlobUnknown
+			return errors.Join(err, ociregistry.ErrBlobUnknown)
 		}
 		return err
 	}
@@ -223,7 +280,11 @@ func (r containerdRegistry) GetBlobRange(ctx context.Context, repo string, diges
 	requestedSize := offset1 - offset0
 	if offset1 < 0 || offset0+requestedSize > br.desc.Size {
 		// "If offset1 is negative or exceeds the actual size of the blob, GetBlobRange will return all the data starting from offset0."
-		return br, nil
+		requestedSize = br.desc.Size - offset0
+	}
+	if offset0 < 0 { // TODO https://github.com/cue-labs/oci/issues/47
+		offset0 = br.desc.Size - offset1
+		requestedSize = offset1
 	}
 
 	ra, err := br.ensureReaderAt()
@@ -245,7 +306,7 @@ func (r containerdRegistry) GetManifest(ctx context.Context, repo string, digest
 	ra, err := r.client.ContentStore().ReaderAt(ctx, desc)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
-			return nil, ociregistry.ErrManifestUnknown
+			return nil, errors.Join(err, ociregistry.ErrManifestUnknown)
 		}
 		return nil, err
 	}
@@ -290,7 +351,7 @@ func (r containerdRegistry) GetTag(ctx context.Context, repo string, tagName str
 			}
 
 			// TODO differentiate ErrNameUnknown (repo unknown) from ErrManifestUnknown ?
-			return nil, ociregistry.ErrManifestUnknown
+			return nil, errors.Join(err, ociregistry.ErrManifestUnknown)
 		}
 		return nil, err
 	}
@@ -330,16 +391,34 @@ func (r containerdRegistry) ResolveTag(ctx context.Context, repo string, tagName
 
 func (r containerdRegistry) DeleteBlob(ctx context.Context, repo string, digest ociregistry.Digest) error {
 	// TODO should we stop this from removing things that are still tagged or children of tagged?
-	return r.client.ContentStore().Delete(ctx, digest)
+	if err := r.client.ContentStore().Delete(ctx, digest); err != nil {
+		if errdefs.IsNotFound(err) {
+			return errors.Join(err, ociregistry.ErrBlobUnknown)
+		}
+		return err
+	}
+	return nil
 }
 
 func (r containerdRegistry) DeleteManifest(ctx context.Context, repo string, digest ociregistry.Digest) error {
 	// TODO should we stop this from removing things that are still tagged or children of tagged?
-	return r.client.ContentStore().Delete(ctx, digest)
+	if err := r.client.ContentStore().Delete(ctx, digest); err != nil {
+		if errdefs.IsNotFound(err) {
+			return errors.Join(err, ociregistry.ErrManifestUnknown)
+		}
+		return err
+	}
+	return nil
 }
 
 func (r containerdRegistry) DeleteTag(ctx context.Context, repo string, name string) error {
-	return r.client.ImageService().Delete(ctx, repo+":"+name)
+	if err := r.client.ImageService().Delete(ctx, repo+":"+name); err != nil {
+		if errdefs.IsNotFound(err) {
+			return errors.Join(err, ociregistry.ErrManifestUnknown)
+		}
+		return err
+	}
+	return nil
 }
 
 func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ociregistry.Descriptor, reader io.Reader) (ociregistry.Descriptor, error) {
@@ -365,8 +444,11 @@ func (r containerdRegistry) PushBlob(ctx context.Context, repo string, desc ocir
 	}
 
 	if err := content.WriteBlob(ctx, cs, ingestRef, reader, desc); err != nil {
-		_ = cs.Abort(ctx, ingestRef)
-		_ = deleteLease(ctx)
+		_ = cs.Abort(context.WithoutCancel(ctx), ingestRef)
+		_ = deleteLease(context.WithoutCancel(ctx))
+		if errdefs.IsFailedPrecondition(err) {
+			err = errors.Join(err, ociregistry.ErrDigestInvalid)
+		}
 		return ociregistry.Descriptor{}, err
 	}
 
@@ -425,6 +507,9 @@ func (bw *containerdBlobWriter) Commit(digest ociregistry.Digest) (ociregistry.D
 		return ociregistry.Descriptor{}, err
 	}
 	if err := bw.Writer.Commit(bw.ctx, 0, digest); err != nil && !errdefs.IsAlreadyExists(err) {
+		if errdefs.IsFailedPrecondition(err) {
+			err = errors.Join(err, ociregistry.ErrDigestInvalid)
+		}
 		return ociregistry.Descriptor{}, err
 	}
 	return ociregistry.Descriptor{
@@ -473,7 +558,7 @@ func (r containerdRegistry) PushBlobChunkedResume(ctx context.Context, repo, id 
 
 	writer, err := content.OpenWriter(ctx, cs, content.WithRef(id))
 	if err != nil {
-		_ = deleteLease(ctx)
+		_ = deleteLease(context.WithoutCancel(ctx))
 		return nil, err
 	}
 
@@ -529,7 +614,6 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 		"l": manifestChildren.Layers,
 	} {
 		for i, d := range list {
-			d := d
 			labelMappings[prefix+"."+strconv.Itoa(i)] = &d
 		}
 	}
@@ -555,6 +639,9 @@ func (r containerdRegistry) PushManifest(ctx context.Context, repo string, tag s
 		return ociregistry.Descriptor{}, err
 	}
 	if err := content.WriteBlob(ctx, cs, ingestRef, bytes.NewReader(contents), desc, content.WithLabels(labels)); err != nil {
+		if errdefs.IsFailedPrecondition(err) {
+			err = errors.Join(err, ociregistry.ErrDigestInvalid)
+		}
 		return ociregistry.Descriptor{}, err
 	}
 

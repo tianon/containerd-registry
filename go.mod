@@ -62,3 +62,7 @@ require (
 	google.golang.org/grpc v1.79.3 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+// TODO temporary hacks -- hopefully can upstream conformance fixes eventually 🙈
+// https://github.com/cue-labs/oci/compare/main...tianon:cuelabs-oci:conformance
+replace cuelabs.dev/go/oci/ociregistry => github.com/tianon/cuelabs-oci/ociregistry v0.0.0-20260320221224-66cf54feb22c
